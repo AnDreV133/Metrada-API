@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: metrada
+  datasource:
+    url: jdbc:postgresql://localhost:5432/monitoring
+    username: postgres
+    password: postgres
+    hikari:
+      maximum-pool-size: 20
+      connection-timeout: 5000
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          batch_size: 100
+        order_inserts: true
+
+scraping:
+  max-concurrent-scrapes: 10
+  default-interval-seconds: 30
+  timeout-seconds: 5
+  retry-attempts: 2
+
+management:
+  endpoints:
+    web:
+      base-path: /api
+      exposure:
+        include: prometheus,health,info
+  metrics:
+    export:
+      prometheus:
+        enabled: true
