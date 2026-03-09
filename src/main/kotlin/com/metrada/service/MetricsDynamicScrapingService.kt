@@ -5,7 +5,7 @@ import com.metrada.entity.AgentEntity
 import com.metrada.entity.MetricEntity
 import com.metrada.entity.TagDictEntity
 import com.metrada.entity.relation.MetricTagEntity
-import com.metrada.model.AgentConfigModel
+import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
 import com.metrada.repository.AgentRepository
 import com.metrada.repository.MetricRepository
@@ -49,7 +49,7 @@ class MetricsDynamicScrapingService(
     private suspend fun scrapeAgent(agent: AgentEntity): List<MetricSampleModel> {
         logger.debug("Scraping agent: ${agent.id}")
         
-        val agentConfig = AgentConfigModel(
+        val agentConfig = AgentModel(
             id = agent.id,
             host = agent.host,
             port = agent.port,

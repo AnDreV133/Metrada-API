@@ -1,8 +1,6 @@
 package com.metrada.scheduler
 
-import com.metrada.client.AgentScraperClient
 import com.metrada.entity.AgentEntity
-import com.metrada.model.AgentConfigModel
 import com.metrada.model.MetricSampleModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore

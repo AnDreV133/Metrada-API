@@ -1,8 +1,8 @@
 package com.metrada.service
 
 import com.metrada.entity.AgentEntity
-import com.metrada.entity.MetricEntity
 import com.metrada.model.AgentsStatsModel
+import com.metrada.model.UpdateAgentModel
 import com.metrada.repository.AgentRepository
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -22,7 +22,7 @@ class AgentConfigurationService(
             val defaultAgent = AgentEntity(
                 id = "agent-1",
                 host = "localhost",
-                port = 9090,
+                port = 9182,
                 path = "/metrics",
                 scrapeIntervalSeconds = 15,
                 enabled = true,
@@ -74,6 +74,34 @@ class AgentConfigurationService(
         )
 
         return agentRepository.save(newAgent)
+    }
+
+    /**
+     * НОВЫЙ МЕТОД: Патч агента с обновлением полей и опциональным переименованием
+     * Использует существующие методы updateAgent и changeAgentId
+     */
+    @Transactional
+    fun patchAgent(id: String, model: UpdateAgentModel): AgentEntity {
+        val existingAgent = getAgent(id)
+            ?: throw IllegalArgumentException("Agent with id $id not found")
+
+        var updatedAgent = existingAgent.copy(
+            host = model.host ?: existingAgent.host,
+            port = model.port ?: existingAgent.port,
+            path = model.path ?: existingAgent.path,
+            scrapeIntervalSeconds = model.scrapeIntervalSeconds ?: existingAgent.scrapeIntervalSeconds,
+            timeoutSeconds = model.timeoutSeconds ?: existingAgent.timeoutSeconds,
+            enabled = model.enabled ?: existingAgent.enabled,
+            updatedAt = Instant.now()
+        )
+
+        if (updatedAgent != existingAgent)
+            updatedAgent = updateAgent(id, updatedAgent)
+
+        if (model.id != null && model.id != id)
+            updatedAgent = changeAgentId(id, model.id)
+
+        return updatedAgent
     }
 
     /**
@@ -149,21 +177,6 @@ class AgentConfigurationService(
         } else {
             false
         }
-    }
-
-    /**
-     * Активировать/деактивировать агента
-     */
-    @Transactional
-    fun setAgentEnabled(id: String, enabled: Boolean): AgentEntity? {
-        val agent = agentRepository.findById(id).orElse(null) ?: return null
-
-        val updatedAgent = agent.copy(
-            enabled = enabled,
-            updatedAt = Instant.now()
-        )
-
-        return agentRepository.save(updatedAgent)
     }
 
     /**

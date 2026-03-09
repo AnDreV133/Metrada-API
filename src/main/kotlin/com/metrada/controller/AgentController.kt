@@ -1,6 +1,7 @@
 package com.metrada.controller
 
 import com.metrada.entity.AgentEntity
+import com.metrada.model.UpdateAgentModel
 import com.metrada.service.AgentConfigurationService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
@@ -31,9 +32,9 @@ class AgentController(
     @PostMapping
     fun createAgent(@RequestBody request: CreateAgentRequest): ResponseEntity<AgentEntity> {
         val agent = AgentEntity(
-            id = request.id,
             host = request.host,
             port = request.port,
+            id = request.run { id ?: "$host:$port" },
             path = request.path ?: "/metrics",
             scrapeIntervalSeconds = request.scrapeIntervalSeconds ?: 15,
             enabled = request.enabled ?: true,
@@ -51,52 +52,17 @@ class AgentController(
         }
     }
 
-    @PutMapping("/{id}")
-    fun updateAgent(
+    @PatchMapping("/{id}")
+    fun patchAgent(
         @PathVariable id: String,
         @RequestBody request: UpdateAgentRequest,
     ): ResponseEntity<AgentEntity> {
-        val agent = AgentEntity(
-            id = id,
-            host = request.host,
-            port = request.port,
-            path = request.path,
-            scrapeIntervalSeconds = request.scrapeIntervalSeconds,
-            enabled = request.enabled,
-            timeoutSeconds = request.timeoutSeconds,
-            lastScrapeAt = null,  // эти поля не обновляются через PUT
-            lastScrapeStatus = null,
-            createdAt = Instant.now(),  // будет заменено в сервисе
-            updatedAt = Instant.now()
-        )
-
         return try {
-            ResponseEntity.ok(agentConfigurationService.updateAgent(id, agent))
+            val updatedAgent = agentConfigurationService.patchAgent(id, request)
+            ResponseEntity.ok(updatedAgent)
         } catch (e: IllegalArgumentException) {
             ResponseEntity.notFound().build()
         }
-    }
-
-    @PatchMapping("/{id}/rename/{newId}")
-    fun renameAgent(
-        @PathVariable id: String,
-        @PathVariable newId: String,
-    ): ResponseEntity<AgentEntity> {
-        return try {
-            ResponseEntity.ok(agentConfigurationService.changeAgentId(id, newId))
-        } catch (e: IllegalArgumentException) {
-            ResponseEntity.notFound().build()
-        }
-    }
-
-    @PatchMapping("/{id}/toggle")
-    fun toggleAgent(
-        @PathVariable id: String,
-        @RequestParam enabled: Boolean,
-    ): ResponseEntity<AgentEntity> {
-        return agentConfigurationService.setAgentEnabled(id, enabled)
-            ?.let { ResponseEntity.ok(it) }
-            ?: ResponseEntity.notFound().build()
     }
 
     @DeleteMapping("/{id}")
@@ -121,21 +87,15 @@ class AgentController(
     fun getStats() = agentConfigurationService.getAgentsStats()
 }
 
+typealias UpdateAgentRequest = UpdateAgentModel
+
 data class CreateAgentRequest(
-    val id: String,
     val host: String,
     val port: Int,
+    val id: String? = null,
     val path: String? = null,
     val scrapeIntervalSeconds: Long? = null,
     val enabled: Boolean? = null,
     val timeoutSeconds: Int? = null,
 )
 
-data class UpdateAgentRequest(
-    val host: String,
-    val port: Int,
-    val path: String,
-    val scrapeIntervalSeconds: Long,
-    val enabled: Boolean,
-    val timeoutSeconds: Int,
-)

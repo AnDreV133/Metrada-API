@@ -1,6 +1,6 @@
 package com.metrada.client
 
-import com.metrada.model.AgentConfigModel
+import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
 import org.slf4j.LoggerFactory
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
@@ -19,7 +19,7 @@ class AgentScraperClient {
         .responseTimeout(Duration.ofSeconds(5))
         .followRedirect(true)
     
-    suspend fun scrapeAgent(agent: AgentConfigModel): List<MetricSampleModel> {
+    suspend fun scrapeAgent(agent: AgentModel): List<MetricSampleModel> {
         val webClient = WebClient.builder()
             .baseUrl("http://${agent.host}:${agent.port}${agent.path}")
             .clientConnector(ReactorClientHttpConnector(httpClient))
@@ -37,7 +37,7 @@ class AgentScraperClient {
         }
     }
     
-    private fun parsePrometheusMetrics(rawData: String, agent: AgentConfigModel): List<MetricSampleModel> {
+    private fun parsePrometheusMetrics(rawData: String, agent: AgentModel): List<MetricSampleModel> {
         val metrics = mutableListOf<MetricSampleModel>()
         val lines = rawData.lines()
         

@@ -1,6 +1,6 @@
 package com.metrada.model
 
-data class AgentConfigModel(
+data class AgentModel(
     val id: String,
     val host: String,
     val port: Int,

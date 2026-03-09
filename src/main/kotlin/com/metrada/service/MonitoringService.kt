@@ -91,20 +91,6 @@ class MonitoringService(
         return metricRepository.findByAgentIdAndTimeRange(agentId, start, end)
     }
 
-    /**
-     * Получение информации об агенте по ID метрики
-     */
-    fun getAgentInfoForMetric(metric: MetricEntity): AgentInfo {
-        val agent = agentRepository.findById(metric.agentId).orElse(null)
-
-        return AgentInfo(
-            agentId = metric.agentId,
-            exists = agent != null,
-            currentHost = agent?.host,
-            isActive = agent?.enabled == true
-        )
-    }
-
     private fun createMetricTags(metric: MetricEntity, tags: Map<String, String>): List<MetricTagEntity> {
         // Находим или создаём теги
         val tagDicts = tags.map { (key, value) ->
