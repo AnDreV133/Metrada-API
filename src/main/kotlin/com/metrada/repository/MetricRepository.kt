@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Repository
@@ -218,6 +219,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
     /**
      * Удаление старых метрик (для политик ретеншна)
      */
+    @Transactional
     @Modifying
     @Query("DELETE FROM MetricEntity m WHERE m.timestamp < :threshold")
     fun deleteOlderThan(@Param("threshold") threshold: Instant)

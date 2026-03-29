@@ -42,6 +42,7 @@ class MetricsDynamicScrapingService(
     /**
      * Основная функция скрапинга - вызывается воркером для каждого агента
      */
+    @Transactional
     private suspend fun scrapeAndSaveMetrics(agent: AgentEntity): List<MetricSampleModel> {
         logger.debug("Scraping agent: ${agent.id} (${agent.host}:${agent.port})")
 
@@ -61,7 +62,11 @@ class MetricsDynamicScrapingService(
 
             if (samples.isNotEmpty()) {
                 scope.launch {
-                    saveMetrics(samples, agent)
+                    try {
+                        saveMetrics(samples, agent)
+                    } catch (e: Exception) {
+                        logger.error("Failed to save metrics: ${e.message}")
+                    }
                 }
 
                 updateAgentStatus(agent.id, "success")
