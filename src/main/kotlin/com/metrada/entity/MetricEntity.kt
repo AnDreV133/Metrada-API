@@ -21,7 +21,7 @@ data class MetricEntity(
     val timestamp: Instant,
 
     @Column(name = "agent_id", length = 50, nullable = false)
-    val agentId: String,  // просто строка, не внешний ключ!
+    val agentId: String,
 
     @OneToMany(mappedBy = "metric", cascade = [CascadeType.ALL], fetch = FetchType.LAZY)
     val metricTags: List<MetricTagEntity> = emptyList()

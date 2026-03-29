@@ -151,26 +151,10 @@ class AgentConfigurationService(
     }
 
     /**
-     * Удалить агента (мягкое удаление через enabled = false)
-     */
-    @Transactional
-    fun softDeleteAgent(id: String): AgentEntity? {
-        val agent = agentRepository.findById(id).orElse(null) ?: return null
-
-        val disabledAgent = agent.copy(
-            enabled = false,
-            updatedAt = Instant.now()
-        )
-
-        return agentRepository.save(disabledAgent)
-    }
-
-    /**
      * Полное удаление агента из БД
-     * Внимание: метрики остаются, но теряется связь с конфигурацией агента
      */
     @Transactional
-    fun hardDeleteAgent(id: String): Boolean {
+    fun deleteAgent(id: String): Boolean {
         return if (agentRepository.existsById(id)) {
             agentRepository.deleteById(id)
             true

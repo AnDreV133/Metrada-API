@@ -12,7 +12,6 @@ import com.metrada.repository.MetricRepository
 import com.metrada.repository.MetricTagRepository
 import com.metrada.repository.TagDictRepository
 import com.metrada.scheduler.DynamicScraperWorkerPool
-import jakarta.annotation.PostConstruct
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -28,28 +27,26 @@ class MetricsDynamicScrapingService(
     private val tagDictRepository: TagDictRepository,
     private val agentRepository: AgentRepository,
     private val metricTagRepository: MetricTagRepository,
-    private val workerPool: DynamicScraperWorkerPool  // новый пул
+    private val workerPool: DynamicScraperWorkerPool,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private val scope = CoroutineScope(Dispatchers.Default)
-    
-    @PostConstruct
-    fun init() {
-        logger.info("Initializing MetricsScrapingService")
-        
+
+    init {
+        logger.info("Initializing MetricsDynamicScrapingService")
+
         // Регистрируем функцию скрапинга в пуле воркеров
-        workerPool.setScraperFunction { agent ->
-            scrapeAgent(agent)
-        }
+        workerPool.scraperFunction = ::scrapeAndSaveMetrics
     }
-    
+
     /**
-     * Функция скрапинга для одного агента
+     * Основная функция скрапинга - вызывается воркером для каждого агента
      */
-    private suspend fun scrapeAgent(agent: AgentEntity): List<MetricSampleModel> {
-        logger.debug("Scraping agent: ${agent.id}")
-        
-        val agentConfig = AgentModel(
+    private suspend fun scrapeAndSaveMetrics(agent: AgentEntity): List<MetricSampleModel> {
+        logger.debug("Scraping agent: ${agent.id} (${agent.host}:${agent.port})")
+
+        // Конвертируем AgentEntity в AgentModel для клиента
+        val agentModel = AgentModel(
             id = agent.id,
             host = agent.host,
             port = agent.port,
@@ -58,22 +55,22 @@ class MetricsDynamicScrapingService(
             enabled = agent.enabled,
             timeoutSeconds = agent.timeoutSeconds
         )
-        
+
         return try {
-            val samples = agentScraperClient.scrapeAgent(agentConfig)
-            
+            val samples = agentScraperClient.scrapeAgent(agentModel)
+
             if (samples.isNotEmpty()) {
-                // Сохраняем метрики в фоне
                 scope.launch {
                     saveMetrics(samples, agent)
                 }
-                
-                // Обновляем статус агента
+
                 updateAgentStatus(agent.id, "success")
+                logger.info("Successfully scraped ${samples.size} metrics from agent ${agent.id}")
             } else {
                 updateAgentStatus(agent.id, "empty")
+                logger.warn("Agent ${agent.id} returned empty metrics")
             }
-            
+
             samples
         } catch (e: Exception) {
             logger.error("Failed to scrape agent ${agent.id}: ${e.message}")
@@ -81,33 +78,34 @@ class MetricsDynamicScrapingService(
             emptyList()
         }
     }
-    
+
     /**
-     * Сохранение метрик в БД
+     * Сохранение метрик в базу данных
      */
     @Transactional
     suspend fun saveMetrics(samples: List<MetricSampleModel>, agent: AgentEntity) {
         try {
-            // Собираем все уникальные теги
+            // Собираем все уникальные теги из всех метрик
             val allTagEntries = samples.flatMap { it.tags.entries }.distinct()
-            
-            // Находим или создаём теги
+
+            // Находим или создаём теги в словаре
             val tagDictMap = findOrCreateTagDicts(allTagEntries)
-            
-            // Создаём метрики
+
+            // Создаём метрики (без тегов пока)
             val metrics = samples.map { sample ->
                 MetricEntity(
                     name = sample.name,
                     value = sample.value,
                     timestamp = sample.timestamp ?: Instant.now(),
                     agentId = agent.id,
-                    metricTags = emptyList()
+                    metricTags = emptyList()  // теги добавим позже
                 )
             }
-            
+
+            // Сохраняем метрики, чтобы получить ID
             val savedMetrics = metricRepository.saveAll(metrics)
-            
-            // Создаём связи с тегами
+
+            // Создаём связи метрик с тегами
             val metricTags = mutableListOf<MetricTagEntity>()
 
             savedMetrics.forEachIndexed { index, metric ->
@@ -121,30 +119,33 @@ class MetricsDynamicScrapingService(
                                 tagDict = tagDict
                             )
                         )
+                    } else {
+                        logger.warn("TagDict not found for $key=$value")
                     }
                 }
             }
-            
+
+            // Сохраняем связи метрик с тегами
             if (metricTags.isNotEmpty()) {
                 metricTagRepository.saveAll(metricTags)
             }
-            
-            logger.debug("Saved ${savedMetrics.size} metrics from agent ${agent.id}")
-            
+
+            logger.debug("Saved ${savedMetrics.size} metrics with ${metricTags.size} tags from agent ${agent.id}")
+
         } catch (e: Exception) {
-            logger.error("Failed to save metrics: ${e.message}", e)
-            throw e
+            logger.error("Failed to save metrics for agent ${agent.id}: ${e.message}", e)
+            throw e  // пробрасываем, чтобы транзакция откатилась
         }
     }
-    
+
     /**
      * Находит или создаёт теги в словаре
      */
     private fun findOrCreateTagDicts(tagEntries: List<Map.Entry<String, String>>): Map<String, TagDictEntity> {
         val result = mutableMapOf<String, TagDictEntity>()
         val toCreate = mutableListOf<Pair<String, String>>()
-        
-        // Сначала ищем существующие
+
+        // Сначала ищем существующие теги
         tagEntries.forEach { (key, value) ->
             val existing = tagDictRepository.findByKeyAndValue(key, value)
             if (existing != null) {
@@ -153,9 +154,10 @@ class MetricsDynamicScrapingService(
                 toCreate.add(key to value)
             }
         }
-        
-        // Создаём недостающие
+
+        // Создаём недостающие теги
         if (toCreate.isNotEmpty()) {
+            logger.debug("Creating ${toCreate.size} new tag dictionaries")
             val newTagDicts = toCreate.map { (key, value) ->
                 TagDictEntity.fromKeyValue(key, value)
             }
@@ -164,13 +166,14 @@ class MetricsDynamicScrapingService(
                 result["${tagDict.tagKey}=${tagDict.tagValue}"] = tagDict
             }
         }
-        
+
         return result
     }
-    
+
     /**
-     * Обновляет статус агента
+     * Обновляет статус последнего скрапинга агента
      */
+    @Transactional
     private fun updateAgentStatus(agentId: String, status: String) {
         scope.launch {
             try {
@@ -180,14 +183,19 @@ class MetricsDynamicScrapingService(
             }
         }
     }
-    
+
     /**
      * Получить статистику работы воркеров
      */
     fun getWorkerStats() = workerPool.getWorkerStats()
-    
+
     /**
-     * Перезапустить воркер для агента
+     * Запустить воркер для агента
      */
-    suspend fun restartWorker(agentId: String) = workerPool.restartWorker(agentId)
+    suspend fun startWorker(agent: AgentEntity) = workerPool.startWorkerForAgent(agent)
+
+    /**
+     * Остановить воркер для агента
+     */
+    suspend fun stopWorker(agent: AgentEntity) = workerPool.stopWorkerForAgent(agent)
 }

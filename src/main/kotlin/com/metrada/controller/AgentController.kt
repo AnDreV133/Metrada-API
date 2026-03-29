@@ -3,6 +3,7 @@ package com.metrada.controller
 import com.metrada.entity.AgentEntity
 import com.metrada.model.UpdateAgentModel
 import com.metrada.service.AgentConfigurationService
+import com.metrada.service.MetricsDynamicScrapingService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import java.time.Instant
@@ -11,6 +12,7 @@ import java.time.Instant
 @RequestMapping("/v1/agents")
 class AgentController(
     private val agentConfigurationService: AgentConfigurationService,
+    private val metricsDynamicScrapingService: MetricsDynamicScrapingService
 ) {
 
     @GetMapping
@@ -30,8 +32,8 @@ class AgentController(
     }
 
     @PostMapping
-    fun createAgent(@RequestBody request: CreateAgentRequest): ResponseEntity<AgentEntity> {
-        val agent = AgentEntity(
+    suspend fun createAgent(@RequestBody request: CreateAgentRequest): ResponseEntity<AgentEntity> {
+        var agent = AgentEntity(
             host = request.host,
             port = request.port,
             id = request.run { id ?: "$host:$port" },
@@ -46,19 +48,29 @@ class AgentController(
         )
 
         return try {
-            ResponseEntity.ok(agentConfigurationService.addAgent(agent))
+            agent = agentConfigurationService.addAgent(agent)
+
+            metricsDynamicScrapingService.startWorker(agent)
+
+            ResponseEntity.ok(agent)
         } catch (e: IllegalArgumentException) {
             ResponseEntity.badRequest().build()
         }
     }
 
     @PatchMapping("/{id}")
-    fun patchAgent(
+    suspend fun patchAgent(
         @PathVariable id: String,
         @RequestBody request: UpdateAgentRequest,
     ): ResponseEntity<AgentEntity> {
         return try {
             val updatedAgent = agentConfigurationService.patchAgent(id, request)
+
+            if (updatedAgent.enabled)
+                metricsDynamicScrapingService.startWorker(updatedAgent)
+            else
+                metricsDynamicScrapingService.stopWorker(updatedAgent);
+
             ResponseEntity.ok(updatedAgent)
         } catch (e: IllegalArgumentException) {
             ResponseEntity.notFound().build()
@@ -70,13 +82,7 @@ class AgentController(
         @PathVariable id: String,
         @RequestParam hard: Boolean = false,
     ): ResponseEntity<Void> {
-        val deleted = if (hard) {
-            agentConfigurationService.hardDeleteAgent(id)
-        } else {
-            agentConfigurationService.softDeleteAgent(id) != null
-        }
-
-        return if (deleted) {
+        return if (agentConfigurationService.deleteAgent(id)) {
             ResponseEntity.ok().build()
         } else {
             ResponseEntity.notFound().build()

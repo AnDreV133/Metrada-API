@@ -20,254 +20,118 @@ class DynamicScraperWorkerPool(
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
-    // Настраиваемые параметры
-    private val maxConcurrentScrapes = 10
-    private val discoveryIntervalMs = 30000L  // 30 секунд
-    private val staleAgentThreshold = Duration.ofMinutes(5)
-
-    // Состояние воркеров
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val workerJobs = ConcurrentHashMap<String, Job>()
     private val agentMutex = Mutex()
-    private var discoveryJob: Job? = null
-
-    // Статистика
     private val workerStats = ConcurrentHashMap<String, WorkerStats>()
+
+    var scraperFunction: (suspend (AgentEntity) -> List<MetricSampleModel>)? = null
 
     @PostConstruct
     fun start() {
-        logger.info("Starting dynamic scraper worker pool")
-
-        // Запускаем воркеры для существующих агентов
-        startAllWorkers()
-
-        // Запускаем фоновое обнаружение новых агентов
-        startAgentDiscovery()
+        logger.info("Starting scraper workers for existing agents")
+        scope.launch {
+            agentConfigurationService.getActiveAgents().forEach { agent ->
+                startWorkerForAgent(agent)
+            }
+        }
     }
 
     @PreDestroy
     fun stop() {
-        logger.info("Stopping dynamic scraper worker pool")
-        discoveryJob?.cancel()
+        logger.info("Stopping all scraper workers")
         workerJobs.values.forEach { it.cancel() }
         workerJobs.clear()
         scope.cancel()
     }
 
     /**
-     * Запускает воркеры для всех активных агентов
+     * Запустить воркер для агента (возвращает true если запущен новый воркер)
+     * true - запущен новый воркер (агент был выключен или новый)
+     * false - воркер уже был запущен (повторный запуск)
      */
-    private fun startAllWorkers() {
-        val activeAgents = agentConfigurationService.getActiveAgents()
-        activeAgents.forEach { agent ->
-            startWorkerForAgent(agent)
+    suspend fun startWorkerForAgent(agent: AgentEntity): Boolean = agentMutex.withLock {
+        // Проверяем, есть ли уже запущенный воркер
+        val existingJob = workerJobs[agent.id]
+
+        if (existingJob != null && existingJob.isActive) {
+            logger.info("Worker for agent ${agent.id} is already running")
+            return@withLock false  // воркер уже запущен
         }
-        logger.info("Started ${workerJobs.size} workers for active agents")
+
+        if (!agent.enabled) {
+            logger.info("Agent ${agent.id} is disabled, not starting worker")
+            return@withLock false
+        }
+
+        // Останавливаем существующий воркер, если есть (но он должен быть уже остановлен)
+        existingJob?.cancel()
+        workerJobs.remove(agent.id)
+
+        logger.info("Starting worker for agent: ${agent.id} (${agent.host}:${agent.port})")
+        workerStats[agent.id] = WorkerStats(agentId = agent.id, startedAt = Instant.now())
+
+        // Создаём и запускаем новый воркер
+        val job = createWorkerJob(agent)
+        workerJobs[agent.id] = job
+
+        true  // запущен новый воркер
     }
 
     /**
-     * Запускает воркер для конкретного агента
+     * Остановить воркер для агента (возвращает true если воркер был остановлен)
+     * true - воркер найден и остановлен
+     * false - воркер не найден (не был запущен)
      */
-    private fun startWorkerForAgent(agent: AgentEntity): Job {
-        return scope.launch {
-            val workerId = agent.id
-            logger.info("Starting worker for agent: ${agent.id} (${agent.host}:${agent.port})")
+    suspend fun stopWorkerForAgent(agent: AgentEntity): Boolean = agentMutex.withLock {
+        val job = workerJobs[agent.id]
 
-            workerStats[workerId] = WorkerStats(
-                agentId = workerId,
-                startedAt = Instant.now()
-            )
-
-            while (isActive) {
-                val startTime = Instant.now()
-
-                try {
-                    // Проверяем, активен ли ещё агент
-                    val currentAgent = agentConfigurationService.getAgent(agent.id)
-                    if (currentAgent == null || !currentAgent.enabled) {
-                        logger.info("Agent ${agent.id} is no longer active, stopping worker")
-                        break
-                    }
-
-                    // Выполняем скрапинг
-                    val scraper = getScraperForAgent(currentAgent)
-                    val samples = scraper(currentAgent)
-
-                    // Обновляем статистику
-                    updateWorkerStats(workerId, success = true, duration = Duration.between(startTime, Instant.now()))
-
-                    logger.debug("Worker ${agent.id} scraped ${samples.size} metrics")
-
-                    // Ждём следующий интервал
-                    val interval = currentAgent.scrapeIntervalSeconds * 1000
-                    delay(interval)
-
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    logger.error("Worker ${agent.id} error: ${e.message}")
-
-                    // Обновляем статистику ошибок
-                    updateWorkerStats(workerId, success = false, error = e.message)
-
-                    // Экспоненциальная задержка при ошибках
-                    val backoff = calculateBackoff(workerStats[workerId])
-                    delay(backoff)
-                }
-            }
-
-            logger.info("Worker for agent ${agent.id} stopped")
+        if (job != null && job.isActive) {
+            job.cancel()
             workerJobs.remove(agent.id)
             workerStats.remove(agent.id)
-        }.also {
-            workerJobs[agent.id] = it
+            logger.info("Stopped worker for agent ${agent.id}")
+            return@withLock true  // воркер остановлен
+        } else {
+            logger.info("No active worker found for agent ${agent.id}")
+            return@withLock false  // воркер не найден
         }
     }
 
     /**
-     * Фоновое обнаружение новых агентов
+     * Внутренний метод для создания воркера
      */
-    private fun startAgentDiscovery() {
-        discoveryJob = scope.launch {
-            while (isActive) {
-                try {
-                    discoverAndSyncAgents()
-                } catch (e: Exception) {
-                    logger.error("Agent discovery error: ${e.message}")
+    private fun createWorkerJob(agent: AgentEntity): Job = scope.launch {
+        while (isActive) {
+            try {
+                val currentAgent = agentConfigurationService.getAgent(agent.id)
+                if (currentAgent == null || !currentAgent.enabled) {
+                    logger.info("Agent ${agent.id} is no longer active, stopping worker")
+                    break
                 }
-                delay(discoveryIntervalMs)
+
+                scraperFunction?.invoke(currentAgent)
+                delay(currentAgent.scrapeIntervalSeconds * 1000)
+
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logger.error("Worker ${agent.id} error: ${e.message}")
+                delay(5000)
             }
         }
-    }
 
-    /**
-     * Обнаруживает новые агенты и синхронизирует состояние
-     */
-    private suspend fun discoverAndSyncAgents() {
+        // Очистка при завершении
         agentMutex.withLock {
-            val activeAgents = agentConfigurationService.getActiveAgents()
-            val activeAgentIds = activeAgents.map { it.id }.toSet()
-
-            // 1. Запускаем воркеры для новых агентов
-            activeAgents.forEach { agent ->
-                if (!workerJobs.containsKey(agent.id)) {
-                    logger.info("Discovered new agent: ${agent.id}")
-                    startWorkerForAgent(agent)
-                }
-            }
-
-            // 2. Останавливаем воркеры для удалённых/отключённых агентов
-            workerJobs.keys.forEach { agentId ->
-                if (agentId !in activeAgentIds) {
-                    logger.info("Agent ${agentId} is no longer active, stopping worker")
-                    workerJobs[agentId]?.cancel()
-                }
-            }
-
-            // 3. Проверяем "зависшие" воркеры
-            checkStaleWorkers()
+            workerJobs.remove(agent.id)
+            workerStats.remove(agent.id)
         }
+        logger.info("Worker for agent ${agent.id} stopped")
     }
 
-    /**
-     * Проверяет воркеры, которые давно не обновляли статистику
-     */
-    private suspend fun checkStaleWorkers() {
-        val now = Instant.now()
-        workerStats.forEach { (agentId, stats) ->
-            if (stats.lastRunAt != null &&
-                Duration.between(stats.lastRunAt, now) > staleAgentThreshold
-            ) {
-
-                logger.warn("Worker for agent ${agentId} appears stale, restarting")
-                workerJobs[agentId]?.cancel()
-
-                // Перезапустится при следующем discovery
-            }
-        }
-    }
-
-    /**
-     * Обновляет статистику воркера
-     */
-    private fun updateWorkerStats(
-        workerId: String,
-        success: Boolean,
-        duration: Duration? = null,
-        error: String? = null,
-    ) {
-        workerStats.compute(workerId) { _, existing ->
-            (existing ?: WorkerStats(agentId = workerId)).copy(
-                lastRunAt = Instant.now(),
-                lastRunDuration = duration,
-                lastError = error,
-                totalRuns = (existing?.totalRuns ?: 0) + 1,
-                successfulRuns = (existing?.successfulRuns ?: 0) + if (success) 1 else 0,
-                failedRuns = (existing?.failedRuns ?: 0) + if (success) 0 else 1
-            )
-        }
-    }
-
-    /**
-     * Вычисляет экспоненциальную задержку при ошибках
-     */
-    private fun calculateBackoff(stats: WorkerStats?): Long {
-        val failedCount = stats?.failedRuns ?: 0
-        return when {
-            failedCount <= 1 -> 1000L      // 1 секунда
-            failedCount <= 3 -> 5000L      // 5 секунд
-            failedCount <= 5 -> 15000L     // 15 секунд
-            else -> 30000L                  // 30 секунд
-        }
-    }
-
-    /**
-     * Функция скрапинга (должна быть внедрена)
-     */
-    private suspend fun getScraperForAgent(agent: AgentEntity): suspend (AgentEntity) -> List<MetricSampleModel> {
-        // Здесь должен быть внедрён реальный скрапер
-        // Например, через DI или callback
-        return { agent ->
-            // Реализация будет добавлена через setScraperFunction
-            emptyList()
-        }
-    }
-
-    // Для внедрения реальной функции скрапинга
-    private var scraperFunction: (suspend (AgentEntity) -> List<MetricSampleModel>)? = null
-
-    fun setScraperFunction(function: suspend (AgentEntity) -> List<MetricSampleModel>) {
-        this.scraperFunction = function
-    }
-
-    /**
-     * Получить статистику всех воркеров
-     */
     fun getWorkerStats(): Map<String, WorkerStats> = workerStats.toMap()
 
-    /**
-     * Принудительно перезапустить воркер для агента
-     */
-    suspend fun restartWorker(agentId: String): Boolean {
-        agentMutex.withLock {
-            workerJobs[agentId]?.cancel()
-            workerJobs.remove(agentId)
-
-            val agent = agentConfigurationService.getAgent(agentId)
-            if (agent != null && agent.enabled) {
-                startWorkerForAgent(agent)
-                return true
-            }
-            return false
-        }
-    }
-
-    /**
-     * Остановить воркер для агента
-     */
-    fun stopWorker(agentId: String): Boolean {
-        return workerJobs[agentId]?.cancel() != null
-    }
+    fun isWorkerRunning(agentId: String): Boolean = workerJobs.containsKey(agentId)
 }
 
 /**
