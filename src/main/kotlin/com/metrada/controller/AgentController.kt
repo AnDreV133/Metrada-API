@@ -3,7 +3,7 @@ package com.metrada.controller
 import com.metrada.entity.AgentEntity
 import com.metrada.model.UpdateAgentModel
 import com.metrada.service.AgentConfigurationService
-import com.metrada.service.MetricsDynamicScrapingService
+import com.metrada.service.MetricsAutoHandlerService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import java.time.Instant
@@ -12,7 +12,7 @@ import java.time.Instant
 @RequestMapping("/v1/agents")
 class AgentController(
     private val agentConfigurationService: AgentConfigurationService,
-    private val metricsDynamicScrapingService: MetricsDynamicScrapingService
+    private val metricsAutoHandlerService: MetricsAutoHandlerService
 ) {
 
     @GetMapping
@@ -50,7 +50,7 @@ class AgentController(
         return try {
             agent = agentConfigurationService.addAgent(agent)
 
-            metricsDynamicScrapingService.startWorker(agent)
+            metricsAutoHandlerService.startWorker(agent)
 
             ResponseEntity.ok(agent)
         } catch (e: IllegalArgumentException) {
@@ -67,9 +67,9 @@ class AgentController(
             val updatedAgent = agentConfigurationService.patchAgent(id, request)
 
             if (updatedAgent.enabled)
-                metricsDynamicScrapingService.startWorker(updatedAgent)
+                metricsAutoHandlerService.startWorker(updatedAgent)
             else
-                metricsDynamicScrapingService.stopWorker(updatedAgent);
+                metricsAutoHandlerService.stopWorker(updatedAgent);
 
             ResponseEntity.ok(updatedAgent)
         } catch (e: IllegalArgumentException) {

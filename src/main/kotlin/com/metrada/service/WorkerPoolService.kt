@@ -1,8 +1,7 @@
-package com.metrada.scheduler
+package com.metrada.service
 
 import com.metrada.entity.AgentEntity
 import com.metrada.model.MetricSampleModel
-import com.metrada.service.AgentConfigurationService
 import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
@@ -15,7 +14,7 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 
 @Component
-class DynamicScraperWorkerPool(
+class WorkerPoolService(
     private val agentConfigurationService: AgentConfigurationService,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -25,7 +24,7 @@ class DynamicScraperWorkerPool(
     private val agentMutex = Mutex()
     private val workerStats = ConcurrentHashMap<String, WorkerStats>()
 
-    var scraperFunction: (suspend (AgentEntity) -> List<MetricSampleModel>)? = null
+    var scraperFunction: (suspend (AgentEntity) -> Unit)? = null
 
     @PostConstruct
     fun start() {

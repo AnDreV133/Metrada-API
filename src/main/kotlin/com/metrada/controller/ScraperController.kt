@@ -1,5 +1,6 @@
 import com.metrada.service.AgentConfigurationService
-import com.metrada.service.MetricsDynamicScrapingService
+import com.metrada.service.MetricsAutoHandlerService
+import com.metrada.service.WorkerStats
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import java.time.Instant
@@ -7,7 +8,7 @@ import java.time.Instant
 @RestController
 @RequestMapping("/v1/scrapers")
 class ScraperController(
-    private val scrapingService: MetricsDynamicScrapingService,
+    private val scrapingService: MetricsAutoHandlerService,
     private val agentConfigurationService: AgentConfigurationService,
 ) {
     /**
@@ -185,7 +186,7 @@ data class WorkerStatsDto(
     val status: String,
 ) {
     companion object {
-        fun fromWorkerStats(agentId: String, stats: com.metrada.scheduler.WorkerStats): WorkerStatsDto {
+        fun fromWorkerStats(agentId: String, stats: WorkerStats): WorkerStatsDto {
             val total = stats.totalRuns
             val success = stats.successfulRuns
             val successRate = if (total > 0) (success.toDouble() / total * 100) else 0.0

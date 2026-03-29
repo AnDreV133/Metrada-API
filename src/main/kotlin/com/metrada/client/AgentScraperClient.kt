@@ -2,6 +2,9 @@ package com.metrada.client
 
 import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.reactive.awaitFirstOrNull
 import org.slf4j.LoggerFactory
 import org.springframework.core.io.buffer.DataBuffer
@@ -21,7 +24,7 @@ class AgentScraperClient {
         .responseTimeout(Duration.ofSeconds(5))
         .followRedirect(true)
 
-    suspend fun scrapeAgent(agent: AgentModel): List<MetricSampleModel> {
+    suspend fun getMetricSampleFlow(agent: AgentModel): Flow<MetricSampleModel> = flow {
         val webClient = WebClient.builder()
             .baseUrl("http://${agent.host}:${agent.port}${agent.path}")
             .clientConnector(ReactorClientHttpConnector(httpClient))
@@ -30,8 +33,7 @@ class AgentScraperClient {
             }
             .build()
 
-        return try {
-
+        try {
             webClient.get()
                 .retrieve()
                 .bodyToFlux<DataBuffer>()
@@ -39,53 +41,44 @@ class AgentScraperClient {
                 .collect({ StringBuilder() }) { sb, chunk ->
                     sb.append(chunk.toString(Charsets.UTF_8))
                 }
-                .map {
-                    parsePrometheusMetrics(it.toString(), agent)
+                .awaitFirstOrNull()?.let {
+                    parsePrometheusFormatMetrics(it.toString(), agent).collect {
+                        emit(it)
+                    }
                 }
-                .awaitFirstOrNull() ?: emptyList()
 
         } catch (e: Exception) {
             logger.error("Failed to scrape agent ${agent.id}: ${e.message}")
-            emptyList()
         }
     }
 
-    private fun parsePrometheusMetrics(rawData: String, agent: AgentModel): List<MetricSampleModel> {
-        val metrics = mutableListOf<MetricSampleModel>()
-        val lines = rawData.lines() // todo very slow!
-
+    private fun parsePrometheusFormatMetrics(rawData: String, agent: AgentModel) = flow<MetricSampleModel> {
         val currentTimestamp = Instant.now()
 
-        for (line in lines) {
-            when {
-                line.startsWith("#") -> continue // комментарии пропускаем
-                line.isBlank() -> continue
-                else -> {
-                    try {
-                        val parts = line.split(" ")
-                        if (parts.size >= 2) {
-                            val namePart = parts[0]
-                            val value = parts[1].toDouble()
+        rawData.lineSequence()
+            .filter { line -> !line.startsWith("#") && line.isNotBlank() }
+            .forEach { line ->
+                try {
+                    val parts = line.split(" ")
+                    if (parts.size >= 2) {
+                        val namePart = parts[0]
+                        val value = parts[1].toDouble()
 
-                            val (name, tags) = parseMetricNameAndTags(namePart)
+                        val (name, tags) = parseMetricNameAndTags(namePart)
 
-                            metrics.add(
-                                MetricSampleModel(
-                                    name = name,
-                                    value = value,
-                                    timestamp = currentTimestamp,
-                                    tags = tags + mapOf("agent_id" to agent.id)
-                                )
+                        emit(
+                            MetricSampleModel(
+                                name = name,
+                                value = value,
+                                timestamp = currentTimestamp,
+                                tags = tags + mapOf("agent_id" to agent.id)
                             )
-                        }
-                    } catch (e: Exception) {
-                        logger.warn("Failed to parse metric line: $line")
+                        )
                     }
+                } catch (e: Exception) {
+                    logger.warn("Failed to parse metric line: $line")
                 }
             }
-        }
-
-        return metrics
     }
 
     private fun parseMetricNameAndTags(input: String): Pair<String, Map<String, String>> {
@@ -113,10 +106,6 @@ class AgentScraperClient {
             } else if (inValueQuotes) sbValue.append(c)
             else sbKey.append(c)
         }
-//        val tags = tagString.split(",")
-//            .map { it.split("=") }
-//            .filter { it.size == 2 }
-//            .associate { it[0] to it[1].trim('"') }
 
         return name to tags
     }

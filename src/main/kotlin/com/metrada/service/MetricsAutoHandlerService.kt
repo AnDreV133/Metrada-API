@@ -1,5 +1,6 @@
 package com.metrada.service
 
+import com.metrada.chunked
 import com.metrada.client.AgentScraperClient
 import com.metrada.entity.AgentEntity
 import com.metrada.entity.MetricEntity
@@ -11,7 +12,6 @@ import com.metrada.repository.AgentRepository
 import com.metrada.repository.MetricRepository
 import com.metrada.repository.MetricTagRepository
 import com.metrada.repository.TagDictRepository
-import com.metrada.scheduler.DynamicScraperWorkerPool
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -21,13 +21,13 @@ import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 @Service
-class MetricsDynamicScrapingService(
+class MetricsAutoHandlerService(
     private val agentScraperClient: AgentScraperClient,
     private val metricRepository: MetricRepository,
     private val tagDictRepository: TagDictRepository,
     private val agentRepository: AgentRepository,
     private val metricTagRepository: MetricTagRepository,
-    private val workerPool: DynamicScraperWorkerPool,
+    private val workerPool: WorkerPoolService,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
     private val scope = CoroutineScope(Dispatchers.Default)
@@ -43,7 +43,7 @@ class MetricsDynamicScrapingService(
      * Основная функция скрапинга - вызывается воркером для каждого агента
      */
     @Transactional
-    private suspend fun scrapeAndSaveMetrics(agent: AgentEntity): List<MetricSampleModel> {
+    private suspend fun scrapeAndSaveMetrics(agent: AgentEntity) {
         logger.debug("Scraping agent: ${agent.id} (${agent.host}:${agent.port})")
 
         // Конвертируем AgentEntity в AgentModel для клиента
@@ -57,11 +57,10 @@ class MetricsDynamicScrapingService(
             timeoutSeconds = agent.timeoutSeconds
         )
 
-        return try {
-            val samples = agentScraperClient.scrapeAgent(agentModel)
-
-            if (samples.isNotEmpty()) {
-                scope.launch {
+        try {
+            agentScraperClient.getMetricSampleFlow(agentModel)
+                .chunked(20)
+                .collect { samples ->
                     try {
                         saveMetrics(samples, agent)
                     } catch (e: Exception) {
@@ -69,18 +68,24 @@ class MetricsDynamicScrapingService(
                     }
                 }
 
-                updateAgentStatus(agent.id, "success")
-                logger.info("Successfully scraped ${samples.size} metrics from agent ${agent.id}")
-            } else {
-                updateAgentStatus(agent.id, "empty")
-                logger.warn("Agent ${agent.id} returned empty metrics")
-            }
+//            if (samples.isNotEmpty()) {
+//            scope.launch {
+//                try {
+//                    saveMetrics(samples, agent)
+//                } catch (e: Exception) {
+//                    logger.error("Failed to save metrics: ${e.message}")
+//                }
+//            }
 
-            samples
+//                updateAgentStatus(agent.id, "success")
+//                logger.info("Successfully scraped ${samples.size} metrics from agent ${agent.id}")
+//            } else {
+//                updateAgentStatus(agent.id, "empty")
+//                logger.warn("Agent ${agent.id} returned empty metrics")
+//            }
         } catch (e: Exception) {
             logger.error("Failed to scrape agent ${agent.id}: ${e.message}")
             updateAgentStatus(agent.id, "failed: ${e.message}")
-            emptyList()
         }
     }
 
