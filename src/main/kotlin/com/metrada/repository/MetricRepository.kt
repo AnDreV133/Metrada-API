@@ -12,18 +12,22 @@ import java.time.Instant
 @Repository
 interface MetricRepository : JpaRepository<MetricEntity, Long> {
 
-
     /**
-     * Удаление старых метрик для конкретного агента с лимитом (batch delete)
+     * Удаление старых метрик для конкретного агента с лимитом (PostgreSQL compatible)
+     * Использует CTE для LIMIT в DELETE
      */
     @Modifying
     @Transactional
     @Query(
         value = """
+            WITH to_delete AS (
+                SELECT id FROM metrics 
+                WHERE agent_id = :agentId 
+                  AND timestamp < :olderThan
+                LIMIT :limit
+            )
             DELETE FROM metrics 
-            WHERE agent_id = :agentId 
-              AND timestamp < :olderThan
-            LIMIT :limit
+            WHERE id IN (SELECT id FROM to_delete)
         """,
         nativeQuery = true
     )
@@ -34,21 +38,43 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
     ): Int
 
     /**
-     * Удаление старых метрик для всех агентов с лимитом
+     * Удаление старых метрик для всех агентов с лимитом (PostgreSQL compatible)
      */
     @Modifying
     @Transactional
     @Query(
         value = """
+            WITH to_delete AS (
+                SELECT id FROM metrics 
+                WHERE timestamp < :olderThan
+                LIMIT :limit
+            )
             DELETE FROM metrics 
-            WHERE timestamp < :olderThan
-            LIMIT :limit
+            WHERE id IN (SELECT id FROM to_delete)
         """,
         nativeQuery = true
     )
     fun deleteOldMetrics(
         @Param("olderThan") olderThan: Instant,
         @Param("limit") limit: Int
+    ): Int
+
+    /**
+     * Удаление всех старых метрик для агента (без лимита)
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = """
+            DELETE FROM metrics 
+            WHERE agent_id = :agentId 
+              AND timestamp < :olderThan
+        """,
+        nativeQuery = true
+    )
+    fun deleteAllOldMetricsForAgent(
+        @Param("agentId") agentId: String,
+        @Param("olderThan") olderThan: Instant
     ): Int
 
     /**
@@ -69,12 +95,12 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         WHERE m.agentId = :agentId
           AND m.timestamp BETWEEN :start AND :end
         ORDER BY m.timestamp DESC
-    """
+        """
     )
     fun findByAgentIdAndTimeRange(
         @Param("agentId") agentId: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -86,12 +112,12 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         WHERE m.name = :name
           AND m.timestamp BETWEEN :start AND :end
         ORDER BY m.timestamp DESC
-    """
+        """
     )
     fun findByNameAndTimeRange(
         @Param("name") name: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -107,14 +133,14 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
           AND td.tagValue = :tagValue
           AND m.timestamp BETWEEN :start AND :end
         ORDER BY m.timestamp DESC
-    """
+        """
     )
     fun findByNameAndTag(
         @Param("metricName") metricName: String,
         @Param("tagKey") tagKey: String,
         @Param("tagValue") tagValue: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -139,7 +165,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
                 AND td2.tagKey = :key2 
                 AND td2.tagValue = :value2
           )
-    """
+        """
     )
     fun findByNameAndTwoTags(
         @Param("metricName") metricName: String,
@@ -148,7 +174,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         @Param("key2") key2: String,
         @Param("value2") value2: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -161,12 +187,12 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         JOIN mt.tagDict td
         WHERE td.tagKey = :tagKey
           AND m.timestamp BETWEEN :start AND :end
-    """
+        """
     )
     fun findByTagKey(
         @Param("tagKey") tagKey: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -178,12 +204,12 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         WHERE m.agentId IN :agentIds
           AND m.timestamp BETWEEN :start AND :end
         ORDER BY m.timestamp DESC
-    """
+        """
     )
     fun findByAgentIds(
         @Param("agentIds") agentIds: Set<String>,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<MetricEntity>
 
     /**
@@ -195,7 +221,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         WHERE m.agentId = :agentId
         ORDER BY m.timestamp DESC
         LIMIT 1
-    """
+        """
     )
     fun findLastMetricByAgentId(@Param("agentId") agentId: String): MetricEntity?
 
@@ -204,23 +230,24 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
      */
     @Query(
         value = """
-        SELECT time_bucket(:bucket, timestamp) as bucket,
-               AVG(value) as avg_value,
-               MAX(value) as max_value,
-               MIN(value) as min_value,
-               COUNT(*) as count
-        FROM metrics 
-        WHERE name = :metricName
-          AND timestamp BETWEEN :start AND :end
-        GROUP BY bucket
-        ORDER BY bucket DESC
-    """, nativeQuery = true
+            SELECT time_bucket(:bucket, timestamp) as bucket,
+                   AVG(value) as avg_value,
+                   MAX(value) as max_value,
+                   MIN(value) as min_value,
+                   COUNT(*) as count
+            FROM metrics 
+            WHERE name = :metricName
+              AND timestamp BETWEEN :start AND :end
+            GROUP BY bucket
+            ORDER BY bucket DESC
+        """,
+        nativeQuery = true
     )
     fun getTimeAggregation(
         @Param("metricName") metricName: String,
         @Param("start") start: Instant,
         @Param("end") end: Instant,
-        @Param("bucket") bucket: String = "1 minute",
+        @Param("bucket") bucket: String = "1 minute"
     ): List<Array<Any>>
 
     /**
@@ -228,23 +255,24 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
      */
     @Query(
         value = """
-        SELECT td.tag_value, 
-               AVG(m.value) as avg_value,
-               COUNT(m) as metric_count
-        FROM metrics m
-        JOIN metric_tags mt ON m.id = mt.metric_id
-        JOIN tags_dict td ON mt.tag_dict_id = td.id
-        WHERE m.name = :metricName
-          AND td.tag_key = :groupByKey
-          AND m.timestamp BETWEEN :start AND :end
-        GROUP BY td.tag_value
-    """, nativeQuery = true
+            SELECT td.tag_value, 
+                   AVG(m.value) as avg_value,
+                   COUNT(m) as metric_count
+            FROM metrics m
+            JOIN metric_tags mt ON m.id = mt.metric_id
+            JOIN tags_dict td ON mt.tag_dict_id = td.id
+            WHERE m.name = :metricName
+              AND td.tag_key = :groupByKey
+              AND m.timestamp BETWEEN :start AND :end
+            GROUP BY td.tag_value
+        """,
+        nativeQuery = true
     )
     fun aggregateByTag(
         @Param("metricName") metricName: String,
         @Param("groupByKey") groupByKey: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): List<Array<Any>>
 
     /**
@@ -256,19 +284,19 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         FROM MetricEntity m
         WHERE m.agentId = :agentId
           AND m.timestamp BETWEEN :start AND :end
-    """
+        """
     )
     fun getAgentStats(
         @Param("agentId") agentId: String,
         @Param("start") start: Instant,
-        @Param("end") end: Instant,
+        @Param("end") end: Instant
     ): Array<Any>
 
     /**
-     * Удаление старых метрик (для политик ретеншна)
+     * Удаление старых метрик (для политик ретеншна) - без лимита
      */
     @Transactional
     @Modifying
     @Query("DELETE FROM MetricEntity m WHERE m.timestamp < :threshold")
-    fun deleteOlderThan(@Param("threshold") threshold: Instant)
+    fun deleteOlderThan(@Param("threshold") threshold: Instant): Int
 }
