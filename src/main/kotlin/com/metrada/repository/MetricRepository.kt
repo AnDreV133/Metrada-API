@@ -12,6 +12,54 @@ import java.time.Instant
 @Repository
 interface MetricRepository : JpaRepository<MetricEntity, Long> {
 
+
+    /**
+     * Удаление старых метрик для конкретного агента с лимитом (batch delete)
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = """
+            DELETE FROM metrics 
+            WHERE agent_id = :agentId 
+              AND timestamp < :olderThan
+            LIMIT :limit
+        """,
+        nativeQuery = true
+    )
+    fun deleteOldMetricsForAgent(
+        @Param("agentId") agentId: String,
+        @Param("olderThan") olderThan: Instant,
+        @Param("limit") limit: Int
+    ): Int
+
+    /**
+     * Удаление старых метрик для всех агентов с лимитом
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = """
+            DELETE FROM metrics 
+            WHERE timestamp < :olderThan
+            LIMIT :limit
+        """,
+        nativeQuery = true
+    )
+    fun deleteOldMetrics(
+        @Param("olderThan") olderThan: Instant,
+        @Param("limit") limit: Int
+    ): Int
+
+    /**
+     * Получить количество метрик для агента старше указанной даты
+     */
+    @Query("SELECT COUNT(m) FROM MetricEntity m WHERE m.agentId = :agentId AND m.timestamp < :olderThan")
+    fun countOldMetricsForAgent(
+        @Param("agentId") agentId: String,
+        @Param("olderThan") olderThan: Instant
+    ): Long
+
     /**
      * Поиск метрик по agent_id и временному диапазону
      */

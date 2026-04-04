@@ -11,6 +11,25 @@ import java.time.Instant
 
 @Repository
 interface MetricTagRepository : JpaRepository<MetricTagEntity, Long> {
+    /**
+     * Удаление orphaned тегов (теги, которые не связаны ни с одной метрикой)
+     */
+    @Modifying
+    @Transactional
+    @Query(
+        value = """
+            DELETE FROM tags_dict 
+            WHERE id IN (
+                SELECT td.id 
+                FROM tags_dict td
+                LEFT JOIN metric_tags mt ON mt.tag_dict_id = td.id
+                WHERE mt.id IS NULL
+                LIMIT :limit
+            )
+        """,
+        nativeQuery = true
+    )
+    fun deleteOrphanedTags(@Param("limit") limit: Int): Int
 
     @Modifying
     @Transactional
