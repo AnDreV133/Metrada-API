@@ -18,25 +18,25 @@ class StorageController(
     /**
      * Получить информацию о значении retention для агента
      */
-    @GetMapping("/{id}/retention")
-    fun getRetentionInfo(@PathVariable id: String): ResponseEntity<Map<String, Any>> {
-        val agent = agentConfigurationService.getAgent(id)
-            ?: return ResponseEntity.notFound().build()
-
-        val oldMetricsCount = metricRepository.countOldMetricsForAgent(
-            agentId = id,
-            olderThan = agent.getRetentionThreshold()
-        )
-
-        return ResponseEntity.ok(
-            mapOf(
-                "agentId" to id,
-                "retentionDays" to agent.retentionDays,
-                "retentionThreshold" to agent.getRetentionThreshold().toString(),
-                "oldMetricsCount" to oldMetricsCount
-            )
-        )
-    }
+//    @GetMapping("/{id}/retention")
+//    fun getRetentionInfo(@PathVariable id: String): ResponseEntity<Map<String, Any>> {
+//        val agent = agentConfigurationService.getAgent(id)
+//            ?: return ResponseEntity.notFound().build()
+//
+//        val oldMetricsCount = metricRepository.countOldMetricsForAgent(
+//            agentId = id,
+//            olderThan = agent.getRetentionThreshold()
+//        )
+//
+//        return ResponseEntity.ok(
+//            mapOf(
+//                "agentId" to id,
+//                "retentionDays" to agent.retentionDays,
+//                "retentionThreshold" to agent.getRetentionThreshold().toString(),
+//                "oldMetricsCount" to oldMetricsCount
+//            )
+//        )
+//    }
 
     /**
      * Принудительная очистка метрик агента

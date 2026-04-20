@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 
+@Deprecated("not used")
 @Component
 class ScraperWorkerPoolScheduler(
     private val maxConcurrentScrapes: Int = 10

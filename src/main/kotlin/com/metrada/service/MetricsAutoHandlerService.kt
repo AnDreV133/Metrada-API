@@ -1,6 +1,6 @@
 package com.metrada.service
 
-import com.metrada.chunked
+import com.metrada.util.chunked
 import com.metrada.client.AgentScraperClient
 import com.metrada.entity.AgentEntity
 import com.metrada.entity.MetricEntity

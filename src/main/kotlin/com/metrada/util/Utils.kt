@@ -1,4 +1,4 @@
-package com.metrada
+package com.metrada.util
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
