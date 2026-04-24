@@ -1,6 +1,5 @@
 package com.metrada.service
 
-import com.metrada.entity.AgentEntity
 import com.metrada.repository.AgentRepository
 import com.metrada.repository.MetricRepository
 import com.metrada.repository.MetricTagRepository
@@ -9,6 +8,8 @@ import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.time.Duration
 import java.time.Instant
 import kotlin.time.Duration.Companion.hours
 
@@ -22,13 +23,12 @@ class MetricsCleanupService(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var cleanupJob: Job? = null
 
-    // Настройки очистки
-    private val cleanupIntervalHours = 6L  // Запуск каждые 6 часов
-    private val batchSize = 1000  // Размер пакета для удаления
+    private val cleanupIntervalHours = 6L
+    private val batchSize = 1000
 
     @PostConstruct
     fun start() {
-        logger.info("Starting metrics cleanup service")
+        logger.info("Starting metrics cleanup service with JPA cascade")
 
         cleanupJob = scope.launch {
             while (isActive) {
@@ -37,8 +37,6 @@ class MetricsCleanupService(
                 } catch (e: Exception) {
                     logger.error("Cleanup failed: ${e.message}", e)
                 }
-
-                // Ждём следующий цикл
                 delay(cleanupIntervalHours.hours.inWholeMilliseconds)
             }
         }
@@ -59,15 +57,14 @@ class MetricsCleanupService(
         val startTime = Instant.now()
 
         try {
-            // Получаем всех агентов с их настройками retention
             val agents = agentRepository.findAll()
-
             var totalDeleted = 0L
             val cleanupResults = mutableListOf<CleanupResult>()
 
-            // Очищаем метрики для каждого агента
-            agents.forEach { agent ->
-                val deleted = cleanupMetricsForAgent(agent)
+            for (agent in agents) {
+                val retentionThreshold = agent.getRetentionThreshold()
+                val deleted = cleanupMetricsForAgent(agent.id, retentionThreshold)
+
                 if (deleted > 0) {
                     cleanupResults.add(
                         CleanupResult(
@@ -77,21 +74,17 @@ class MetricsCleanupService(
                         )
                     )
                     totalDeleted += deleted
+                    logger.info("Deleted $deleted metrics for agent ${agent.id}")
                 }
             }
 
-            // Очищаем orphaned теги (теги, которые не используются)
+            // Очищаем orphaned теги (теги без связей)
             val orphanedTagsDeleted = cleanupOrphanedTags()
 
-            val duration = java.time.Duration.between(startTime, Instant.now())
+            val duration = Duration.between(startTime, Instant.now())
             logger.info(
                 "Cleanup completed: deleted $totalDeleted metrics, $orphanedTagsDeleted orphaned tags in ${duration.seconds}s"
             )
-
-            // Логируем детали
-            if (cleanupResults.isNotEmpty()) {
-                logger.debug("Cleanup details: {}", cleanupResults)
-            }
 
         } catch (e: Exception) {
             logger.error("Error during cleanup cycle: ${e.message}", e)
@@ -99,58 +92,58 @@ class MetricsCleanupService(
     }
 
     /**
-     * Очистка метрик для конкретного агента
+     * Очистка метрик для конкретного агента с использованием JPA
+     * Благодаря JPA cascade, связи в metric_tags удаляются автоматически
      */
-    private suspend fun cleanupMetricsForAgent(agent: AgentEntity): Long {
-        val retentionThreshold = agent.getRetentionThreshold()
-
-        logger.debug(
-            "Cleaning metrics for agent ${agent.id}: " +
-                    "retention=${agent.retentionDays} days, " +
-                    "threshold=$retentionThreshold"
-        )
-
+    private suspend fun cleanupMetricsForAgent(agentId: String, olderThan: Instant): Long {
         var totalDeleted = 0L
 
         try {
-            // Удаляем пакетами, чтобы не перегружать БД
             while (true) {
-                val deleted = metricRepository.deleteOldMetricsForAgent(
-                    agentId = agent.id,
-                    olderThan = retentionThreshold,
+                // Используем JPA метод - каскад сработает автоматически
+                val deleted = deleteOldMetricsForAgent(
+                    agentId = agentId,
+                    olderThan = olderThan,
                     limit = batchSize
                 )
 
                 if (deleted == 0) break
                 totalDeleted += deleted
 
-                logger.debug("Deleted {} metrics for agent {} (total: {})", deleted, agent.id, totalDeleted)
-
-                // Небольшая задержка между пакетами
+                logger.debug("Deleted batch of $deleted metrics for agent $agentId (total: $totalDeleted)")
                 delay(100)
             }
         } catch (e: Exception) {
-            logger.error("Error cleaning metrics for agent ${agent.id}: ${e.message}", e)
+            logger.error("Error cleaning metrics for agent $agentId: ${e.message}", e)
         }
 
         return totalDeleted
     }
 
+    @Transactional
+    fun deleteOldMetricsForAgent(agentId: String, olderThan: Instant, limit: Int): Int {
+        // Находим ID метрик для удаления
+        val ids = metricRepository.findOldMetricIdsForAgent(agentId, olderThan, limit)
+        if (ids.isEmpty()) return 0
+
+        // Удаляем через JPA - каскад сработает автоматически
+        metricRepository.deleteAllByIdIn(ids)
+        return ids.size
+    }
+
     /**
-     * Очистка orphaned тегов (теги, которые не связаны ни с одной метрикой)
+     * Очистка orphaned тегов
+     * Теги, которые не связаны ни с одной метрикой, можно удалить
      */
     private suspend fun cleanupOrphanedTags(): Long {
         logger.debug("Cleaning orphaned tags")
-
         var totalDeleted = 0L
 
         try {
             while (true) {
                 val deleted = metricTagRepository.deleteOrphanedTags(batchSize)
-
                 if (deleted == 0) break
                 totalDeleted += deleted
-
                 logger.debug("Deleted $deleted orphaned tags (total: $totalDeleted)")
                 delay(100)
             }
@@ -162,7 +155,7 @@ class MetricsCleanupService(
     }
 
     /**
-     * Принудительный запуск очистки (можно вызвать через API)
+     * Принудительный запуск очистки для всех агентов
      */
     suspend fun forceCleanup(): CleanupSummary {
         logger.info("Forced cleanup requested")
@@ -170,7 +163,7 @@ class MetricsCleanupService(
 
         performCleanup()
 
-        val duration = java.time.Duration.between(startTime, Instant.now())
+        val duration = Duration.between(startTime, Instant.now())
 
         return CleanupSummary(
             timestamp = Instant.now(),
@@ -180,14 +173,14 @@ class MetricsCleanupService(
     }
 
     /**
-     * Очистка метрик для конкретного агента по запросу
+     * Очистка для конкретного агента по запросу
      */
     suspend fun cleanupForAgent(agentId: String): CleanupResult? {
-        val agent = agentRepository.findById(agentId).orElse(null)
-            ?: return null
+        val agent = agentRepository.findById(agentId).orElse(null) ?: return null
 
         logger.info("Forced cleanup for agent $agentId")
-        val deletedCount = cleanupMetricsForAgent(agent)
+        val retentionThreshold = agent.getRetentionThreshold()
+        val deletedCount = cleanupMetricsForAgent(agentId, retentionThreshold)
 
         return CleanupResult(
             agentId = agentId,
@@ -197,18 +190,12 @@ class MetricsCleanupService(
     }
 }
 
-/**
- * Результат очистки для агента
- */
 data class CleanupResult(
     val agentId: String,
     val retentionDays: Int,
     val deletedCount: Long,
 )
 
-/**
- * Сводка очистки
- */
 data class CleanupSummary(
     val timestamp: Instant,
     val durationSeconds: Long,

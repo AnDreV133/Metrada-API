@@ -22,9 +22,10 @@
 //import org.springframework.stereotype.Service
 //import org.springframework.transaction.annotation.Transactional
 //import java.time.Instant
-//
+
 //@Service
-//class MetricsScrapingService_(
+@Deprecated("no valid")
+class MetricsScrapingService_()
 //    private val agentScraperClient: AgentScraperClient,
 //    private val metricRepository: MetricRepository,
 //    private val tagDictRepository: TagDictRepository,
