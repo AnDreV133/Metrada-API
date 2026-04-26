@@ -483,4 +483,54 @@ object MathSeriesUtil {
 
         return result
     }
+
+    fun notEqual(values: List<Double>, threshold: Double): List<Double> =
+        values.map { if (it != threshold) 1.0 else 0.0 }
+
+    // Векторные сравнения
+    fun greaterThanVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] > b[i]) 1.0 else 0.0 }
+    }
+
+    fun lessThanVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] < b[i]) 1.0 else 0.0 }
+    }
+
+    fun greaterOrEqualVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] >= b[i]) 1.0 else 0.0 }
+    }
+
+    fun lessOrEqualVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] <= b[i]) 1.0 else 0.0 }
+    }
+
+    fun equalVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] == b[i]) 1.0 else 0.0 }
+    }
+
+    fun notEqualVec(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] != b[i]) 1.0 else 0.0 }
+    }
+
+    // Логические операторы (векторные)
+    fun and(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] != 0.0 && b[i] != 0.0) 1.0 else 0.0 }
+    }
+
+    fun or(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] != 0.0 || b[i] != 0.0) 1.0 else 0.0 }
+    }
+
+    fun unless(a: List<Double>, b: List<Double>): List<Double> {
+        val size = min(a.size, b.size)
+        return (0 until size).map { i -> if (a[i] != 0.0 && b[i] == 0.0) 1.0 else 0.0 }
+    }
 }

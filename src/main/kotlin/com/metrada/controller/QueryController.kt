@@ -1,23 +1,21 @@
 package com.metrada.controller
 
-import org.springframework.web.bind.annotation.GetMapping
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
-
 import com.metrada.model.MatrixResult
 import com.metrada.model.MetricData
 import com.metrada.model.MetricResponse
 import com.metrada.model.VectorResult
 import com.metrada.service.MetricQueryService
-import org.springframework.format.annotation.DateTimeFormat
-import org.springframework.web.bind.annotation.*
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
+import org.springframework.web.bind.annotation.RestController
 import java.time.Duration
 import java.time.Instant
 
 @RestController
 @RequestMapping("/v1")
 class QueryController(
-    private val metricQueryService: MetricQueryService
+    private val metricQueryService: MetricQueryService,
 ) {
 
     /**
@@ -30,11 +28,14 @@ class QueryController(
     @GetMapping("/query")
     fun instantQuery(
         @RequestParam query: String,
-        @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) time: Instant?
+        @RequestParam(required = false) time: String?,
     ): MetricResponse {
-        val evalTime = time ?: Instant.now()
+        val evalTime = when {
+            time == null -> Instant.now()
+            time.matches(Regex("\\d+(\\.\\d+)?")) -> Instant.ofEpochSecond(time.toDouble().toLong())
+            else -> Instant.parse(time)
+        }
         val result = metricQueryService.queryInstant(query, evalTime)
-
         return buildInstantResponse(result, evalTime)
     }
 
@@ -50,14 +51,20 @@ class QueryController(
     @GetMapping("/query_range")
     fun rangeQuery(
         @RequestParam query: String,
-        @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) start: Instant,
-        @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) end: Instant,
-        @RequestParam step: String
+        @RequestParam start: String,
+        @RequestParam end: String,
+        @RequestParam step: String,
     ): MetricResponse {
+        val startTime = parseTime(start)
+        val endTime = parseTime(end)
         val stepDuration = parseDuration(step)
-        val rangeResults = metricQueryService.queryRange(query, start, end, stepDuration)
-
+        val rangeResults = metricQueryService.queryRange(query, startTime, endTime, stepDuration)
         return buildRangeResponse(rangeResults)
+    }
+
+    private fun parseTime(timeStr: String): Instant = when {
+        timeStr.matches(Regex("\\d+(\\.\\d+)?")) -> Instant.ofEpochSecond(timeStr.toDouble().toLong())
+        else -> Instant.parse(timeStr)
     }
 
     // ==================== Формирование ответов ====================
@@ -74,6 +81,7 @@ class QueryController(
                     )
                 )
             }
+
             is List<*> -> {
                 // Вектор: список объектов с метрикой и значением
                 val vector = listOf(
@@ -89,6 +97,7 @@ class QueryController(
                     )
                 )
             }
+
             else -> {
                 // Неподдерживаемый тип – возвращаем ошибку
                 MetricResponse(

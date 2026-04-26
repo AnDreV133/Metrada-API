@@ -1,19 +1,48 @@
 package com.metrada.util.math
 
 import com.metrada.model.MetricReference
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.pow
-import kotlin.math.sqrt
 
 /**
- * Stateless парсер PromQL-подобных запросов
+ * Stateless парсер PromQL-подобных запросов с поддержкой бинарных операторов
  * Потокобезопасен, можно использовать как синглтон (object)
  */
 object ExpressionParser {
 
     private const val DEFAULT_RANGE = "1m"
     private val DEFAULT_RANGE_SECONDS = parseDurationStatic(DEFAULT_RANGE)
+
+    // Приоритеты операторов (чем выше, тем выше приоритет)
+    private val operatorPrecedence = mapOf(
+        "or" to 10,
+        "unless" to 10,
+        "and" to 15,
+        "==" to 20, "!=" to 20,
+        ">" to 30, ">=" to 30, "<" to 30, "<=" to 30,
+        "+" to 40, "-" to 40,
+        "*" to 50, "/" to 50,
+        "%" to 50,
+        "^" to 60
+    )
+
+    private val leftAssociative = setOf("+", "-", "*", "/", "%", "==", "!=", ">", ">=", "<", "<=", "and", "or", "unless")
+    private val rightAssociative = setOf("^")
+
+    // Преобразование операторов в имена функций MathSeriesUtil
+    private val operatorToFunction = mapOf(
+        "+" to "add",
+        "-" to "subtract",
+        "*" to "multiply",
+        "/" to "divide",
+        ">" to "greater_than",
+        "<" to "less_than",
+        ">=" to "greater_or_equal",
+        "<=" to "less_or_equal",
+        "==" to "equal",
+        "!=" to "not_equal",
+        "and" to "and",
+        "or" to "or",
+        "unless" to "unless"
+    )
 
     private fun parseDurationStatic(duration: String): Long {
         var totalSeconds = 0L
@@ -47,28 +76,22 @@ object ExpressionParser {
         return totalSeconds
     }
 
-    /**
-     * Основной метод: принимает строку запроса и карту доступных рядов
-     */
+    // ==================== Публичные методы ====================
+
     fun parse(query: String, seriesMap: Map<String, List<Double>>): Any {
         val normalizedQuery = normalizeQuery(query)
         val tokens = tokenize(normalizedQuery)
         val parserState = ParserState(tokens, 0)
-
-        val result = parseExpression(parserState, seriesMap)
+        val result = parseExpression(parserState, seriesMap, 0)
 
         if (parserState.position < parserState.tokens.size) {
             throw IllegalArgumentException(
                 "Unexpected tokens at end of query: ${parserState.tokens.subList(parserState.position, parserState.tokens.size)}"
             )
         }
-
         return result
     }
 
-    /**
-     * Извлекает все ссылки на метрики из запроса
-     */
     fun extractMetricReferences(query: String): List<MetricReference> {
         val references = mutableSetOf<MetricReference>()
         val normalizedQuery = normalizeQuery(query)
@@ -92,9 +115,6 @@ object ExpressionParser {
         return references.toList()
     }
 
-    /**
-     * Извлекает только имена метрик (без тегов и интервалов)
-     */
     fun extractMetricNames(query: String): List<String> {
         return extractMetricReferences(query).map { it.name }.distinct()
     }
@@ -132,7 +152,6 @@ object ExpressionParser {
         pattern.findAll(tagsString).forEach { match ->
             tags[match.groupValues[1]] = match.groupValues[2]
         }
-
         return tags
     }
 
@@ -167,7 +186,10 @@ object ExpressionParser {
                     while (j < chars.size && (chars[j].isLetterOrDigit() || chars[j] == '_')) {
                         j++
                     }
-                    tokens.add(Token(TokenType.IDENTIFIER, query.substring(i, j)))
+                    val word = query.substring(i, j)
+                    // Определяем, является ли слово оператором
+                    val tokenType = if (word in operatorPrecedence) TokenType.BINARY_OP else TokenType.IDENTIFIER
+                    tokens.add(Token(tokenType, word))
                     i = j
                 }
                 char.isDigit() || char == '.' -> {
@@ -180,42 +202,159 @@ object ExpressionParser {
                     tokens.add(Token(TokenType.NUMBER, query.substring(i, j).toDouble()))
                     i = j
                 }
+                char == '+' || char == '-' || char == '*' || char == '/' || char == '%' || char == '^' ||
+                        char == '=' || char == '!' || char == '>' || char == '<' -> {
+                    // Составные операторы: ==, !=, >=, <=
+                    var j = i
+                    while (j < chars.size && (chars[j] in setOf('=', '!', '>', '<'))) {
+                        j++
+                    }
+                    val op = query.substring(i, j)
+                    if (op in operatorPrecedence) {
+                        tokens.add(Token(TokenType.BINARY_OP, op))
+                    } else {
+                        error("Unknown operator: $op")
+                    }
+                    i = j
+                }
                 else -> i++
             }
         }
         return tokens
     }
 
-    private fun parseExpression(state: ParserState, seriesMap: Map<String, List<Double>>): Any {
+    // parseExpression с учётом бинарных операторов (рекурсивный спуск по приоритетам)
+    private fun parseExpression(state: ParserState, seriesMap: Map<String, List<Double>>, minPrecedence: Int): Any {
+        var left = parsePrimary(state, seriesMap)
+
+        while (state.position < state.tokens.size) {
+            val token = peekToken(state)
+            if (token.type != TokenType.BINARY_OP) break
+
+            val op = token.value as String
+            val precedence = operatorPrecedence[op] ?: break
+            if (precedence < minPrecedence) break
+
+            consumeToken(state, TokenType.BINARY_OP)
+
+            val nextMinPrec = if (op in rightAssociative) precedence else precedence + 1
+            val right = parseExpression(state, seriesMap, nextMinPrec)
+
+            left = applyBinaryOperator(op, left, right)
+        }
+
+        return left
+    }
+    private fun parsePrimary(state: ParserState, seriesMap: Map<String, List<Double>>): Any {
         val token = peekToken(state)
 
         return when (token.type) {
+            TokenType.NUMBER -> {
+                consumeToken(state, TokenType.NUMBER)
+                token.value as Double
+            }
             TokenType.IDENTIFIER -> {
                 if (isFunctionCall(state)) {
                     parseFunctionCall(state, seriesMap)
                 } else {
                     val metricName = token.value as String
                     consumeToken(state, TokenType.IDENTIFIER)
-
                     val key = findMatchingKey(metricName, seriesMap)
                     seriesMap[key] ?: error("Series '$metricName' not found. Available keys: ${seriesMap.keys}")
                 }
             }
-            TokenType.NUMBER -> {
-                val number = token.value as Double
-                consumeToken(state, TokenType.NUMBER)
-                number
-            }
             TokenType.LPAREN -> {
                 consumeToken(state, TokenType.LPAREN)
-                val result = parseExpression(state, seriesMap)
+                val expr = parseExpression(state, seriesMap, 0)
                 consumeToken(state, TokenType.RPAREN)
-                result
+                expr
             }
             else -> error("Unexpected token: ${token.type}")
         }
     }
 
+    private fun applyBinaryOperator(op: String, left: Any, right: Any): Any {
+        val leftList = when (left) {
+            is Double -> listOf(left)
+            is List<*> -> {
+                @Suppress("UNCHECKED_CAST")
+                left as List<Double>
+            }
+            else -> error("Unsupported left operand type: ${left::class}")
+        }
+
+        val rightAny = right
+        val functionName = operatorToFunction[op] ?: error("Unknown operator: $op")
+
+        return when (functionName) {
+            // Арифметика: оба операнда приводятся к спискам (скаляр расширяется)
+            "add", "subtract", "multiply", "divide" -> {
+                val rightList = when (rightAny) {
+                    is Double -> listOf(rightAny)
+                    is List<*> -> {
+                        @Suppress("UNCHECKED_CAST")
+                        rightAny as List<Double>
+                    }
+                    else -> error("Unsupported right operand type: ${rightAny::class}")
+                }
+                when (functionName) {
+                    "add" -> MathSeriesUtil.add(leftList, rightList)
+                    "subtract" -> MathSeriesUtil.subtract(leftList, rightList)
+                    "multiply" -> MathSeriesUtil.multiply(leftList, rightList)
+                    "divide" -> MathSeriesUtil.divide(leftList, rightList)
+                    else -> error("Unexpected")
+                }
+            }
+            // Сравнения: правая часть может быть скаляром или списком
+            "greater_than", "less_than", "greater_or_equal", "less_or_equal", "equal", "not_equal" -> {
+                when (rightAny) {
+                    is Double -> {
+                        when (functionName) {
+                            "greater_than" -> MathSeriesUtil.greaterThan(leftList, rightAny)
+                            "less_than" -> MathSeriesUtil.lessThan(leftList, rightAny)
+                            "greater_or_equal" -> MathSeriesUtil.greaterOrEqual(leftList, rightAny)
+                            "less_or_equal" -> MathSeriesUtil.lessOrEqual(leftList, rightAny)
+                            "equal" -> MathSeriesUtil.equal(leftList, rightAny)
+                            "not_equal" -> MathSeriesUtil.notEqual(leftList, rightAny)
+                            else -> error("Unexpected")
+                        }
+                    }
+                    is List<*> -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val rightList = rightAny as List<Double>
+                        when (functionName) {
+                            "greater_than" -> MathSeriesUtil.greaterThanVec(leftList, rightList)
+                            "less_than" -> MathSeriesUtil.lessThanVec(leftList, rightList)
+                            "greater_or_equal" -> MathSeriesUtil.greaterOrEqualVec(leftList, rightList)
+                            "less_or_equal" -> MathSeriesUtil.lessOrEqualVec(leftList, rightList)
+                            "equal" -> MathSeriesUtil.equalVec(leftList, rightList)
+                            "not_equal" -> MathSeriesUtil.notEqualVec(leftList, rightList)
+                            else -> error("Unexpected")
+                        }
+                    }
+                    else -> error("Unsupported right operand type: ${rightAny::class}")
+                }
+            }
+            // Логические: and, or, unless
+            "and", "or", "unless" -> {
+                val rightList = when (rightAny) {
+                    is Double -> listOf(rightAny)
+                    is List<*> -> {
+                        @Suppress("UNCHECKED_CAST")
+                        rightAny as List<Double>
+                    }
+                    else -> error("Unsupported right operand type for logical op: ${rightAny::class}")
+                }
+                when (functionName) {
+                    "and" -> MathSeriesUtil.and(leftList, rightList)
+                    "or" -> MathSeriesUtil.or(leftList, rightList)
+                    "unless" -> MathSeriesUtil.unless(leftList, rightList)
+                    else -> error("Unexpected")
+                }
+            }
+            else -> error("Unsupported binary operation: $functionName")
+        }
+    }
     private fun parseFunctionCall(state: ParserState, seriesMap: Map<String, List<Double>>): Any {
         val functionName = (consumeToken(state, TokenType.IDENTIFIER).value as String).lowercase()
         consumeToken(state, TokenType.LPAREN)
@@ -223,42 +362,24 @@ object ExpressionParser {
         val args = mutableListOf<Any>()
 
         while (peekToken(state).type != TokenType.RPAREN) {
-            args.add(parseExpression(state, seriesMap))
+            args.add(parseExpression(state, seriesMap, 0))
             if (peekToken(state).type == TokenType.COMMA) {
                 consumeToken(state, TokenType.COMMA)
             }
         }
-
         consumeToken(state, TokenType.RPAREN)
+
         return executeFunction(functionName, args)
     }
 
     private fun executeFunction(name: String, args: List<Any>): Any {
         return when (name) {
-            "sum" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.sum(series)
-            }
-            "avg" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.avg(series)
-            }
-            "min" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.min(series)
-            }
-            "max" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.max(series)
-            }
-            "stddev" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.stddev(series)
-            }
-            "count" -> {
-                val series = extractSeriesList(args)
-                MathSeriesUtil.count(series)
-            }
+            "sum" -> MathSeriesUtil.sum(extractSeriesList(args))
+            "avg" -> MathSeriesUtil.avg(extractSeriesList(args))
+            "min" -> MathSeriesUtil.min(extractSeriesList(args))
+            "max" -> MathSeriesUtil.max(extractSeriesList(args))
+            "stddev" -> MathSeriesUtil.stddev(extractSeriesList(args))
+            "count" -> MathSeriesUtil.count(extractSeriesList(args))
             "topk" -> {
                 val k = (args[0] as Double).toInt()
                 val series = args.drop(1).map { it as List<Double> }
@@ -269,83 +390,58 @@ object ExpressionParser {
                 val series = args.drop(1).map { it as List<Double> }
                 MathSeriesUtil.bottomk(k, series)
             }
-            "rate" -> {
-                MathSeriesUtil.rate(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "irate" -> {
-                MathSeriesUtil.irate(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong()
-                )
-            }
-            "increase" -> {
-                MathSeriesUtil.increase(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "delta" -> {
-                MathSeriesUtil.delta(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "avg_over_time" -> {
-                MathSeriesUtil.avgOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "sum_over_time" -> {
-                MathSeriesUtil.sumOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "max_over_time" -> {
-                MathSeriesUtil.maxOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "min_over_time" -> {
-                MathSeriesUtil.minOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "count_over_time" -> {
-                MathSeriesUtil.countOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
-            "quantile_over_time" -> {
-                MathSeriesUtil.quantileOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong(),
-                    args[3] as Double
-                )
-            }
-            "stddev_over_time" -> {
-                MathSeriesUtil.stddevOverTime(
-                    args[0] as List<Double>,
-                    (args[1] as Double).toLong(),
-                    (args[2] as Double).toLong()
-                )
-            }
+            "rate" -> MathSeriesUtil.rate(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "irate" -> MathSeriesUtil.irate(args[0] as List<Double>, (args[1] as Double).toLong())
+            "increase" -> MathSeriesUtil.increase(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "delta" -> MathSeriesUtil.delta(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "avg_over_time" -> MathSeriesUtil.avgOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "sum_over_time" -> MathSeriesUtil.sumOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "max_over_time" -> MathSeriesUtil.maxOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "min_over_time" -> MathSeriesUtil.minOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "count_over_time" -> MathSeriesUtil.countOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
+            "quantile_over_time" -> MathSeriesUtil.quantileOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong(),
+                args[3] as Double
+            )
+            "stddev_over_time" -> MathSeriesUtil.stddevOverTime(
+                args[0] as List<Double>,
+                (args[1] as Double).toLong(),
+                (args[2] as Double).toLong()
+            )
             "abs" -> MathSeriesUtil.abs(args[0] as List<Double>)
             "floor" -> MathSeriesUtil.floor(args[0] as List<Double>)
             "ceil" -> MathSeriesUtil.ceil(args[0] as List<Double>)
@@ -394,10 +490,8 @@ object ExpressionParser {
 
     private fun findMatchingKey(metricName: String, seriesMap: Map<String, List<Double>>): String {
         if (seriesMap.containsKey(metricName)) return metricName
-
         val withDefaultRange = "$metricName[$DEFAULT_RANGE]"
         if (seriesMap.containsKey(withDefaultRange)) return withDefaultRange
-
         val matchingKey = seriesMap.keys.find { it == metricName || it.startsWith("$metricName[") }
         return matchingKey ?: metricName
     }
@@ -408,36 +502,26 @@ object ExpressionParser {
     }
 
     private fun peekToken(state: ParserState): Token {
-        if (state.position >= state.tokens.size) {
-            error("Unexpected end of input")
-        }
+        if (state.position >= state.tokens.size) error("Unexpected end of input")
         return state.tokens[state.position]
     }
 
     private fun consumeToken(state: ParserState, expectedType: TokenType): Token {
         val token = peekToken(state)
-        if (token.type != expectedType) {
-            error("Expected $expectedType, but got ${token.type}")
-        }
+        if (token.type != expectedType) error("Expected $expectedType, but got ${token.type}")
         state.position++
         return token
     }
 
     // ==================== Вспомогательные классы ====================
 
-    private class ParserState(
-        val tokens: List<Token>,
-        var position: Int
-    )
+    private class ParserState(val tokens: List<Token>, var position: Int)
 
     private enum class TokenType {
-        IDENTIFIER, LPAREN, RPAREN, COMMA, NUMBER
+        IDENTIFIER, LPAREN, RPAREN, COMMA, NUMBER, BINARY_OP
     }
 
-    private data class Token(
-        val type: TokenType,
-        val value: Any,
-    )
+    private data class Token(val type: TokenType, val value: Any)
 
     private val FUNCTIONS_LIST = setOf(
         "rate", "irate", "increase", "delta",
