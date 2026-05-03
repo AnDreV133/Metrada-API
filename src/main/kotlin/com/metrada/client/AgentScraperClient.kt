@@ -71,7 +71,10 @@ class AgentScraperClient {
                                 name = name,
                                 value = value,
                                 timestamp = currentTimestamp,
-                                tags = tags + mapOf("agent_id" to agent.id)
+                                tags = tags + mapOf(
+                                    "__name__" to name,
+                                    "instance" to agent.id
+                                )
                             )
                         )
                     }

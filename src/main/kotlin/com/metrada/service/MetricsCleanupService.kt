@@ -128,7 +128,7 @@ class MetricsCleanupService(
 
         // Удаляем через JPA - каскад сработает автоматически
         metricRepository.deleteAllByIdIn(ids)
-        return ids.size
+        return ids.size // todo too many ids, cant delete metrics, need batching
     }
 
     /**

@@ -28,7 +28,7 @@ data class TagDictEntity(
             )
         }
 
-        private fun generateHash(key: String, value: String): String {
+        fun generateHash(key: String, value: String): String {
             return "$key=$value".hashCode().toString(16)
         }
     }

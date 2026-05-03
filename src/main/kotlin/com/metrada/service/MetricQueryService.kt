@@ -1,140 +1,112 @@
+// service/MetricQueryService.kt
 package com.metrada.service
 
-import com.metrada.model.MetricReference
-import com.metrada.repository.MetricRepository
-import com.metrada.util.math.ExpressionParser
+import com.metrada.model.MatrixResultModel
+import com.metrada.model.MetricDataModel
+import com.metrada.model.MetricResponseModel
+import com.metrada.model.VectorResultModel
+import com.metrada.service.parser.Engine
+import com.metrada.service.parser.Querier
+import com.metrada.service.parser.Value
+import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
-import java.time.Instant
 import java.time.Duration
+import java.time.Instant
 
 @Service
 class MetricQueryService(
-    private val metricRepository: MetricRepository,
+    private val engine: Engine,
+    private val querier: Querier,
 ) {
+    private val logger = LoggerFactory.getLogger(javaClass)
 
     /**
-     * Мгновенный запрос: возвращает значение на указанный момент времени.
+     * Мгновенный запрос – возвращает ответ в формате Prometheus API.
      * @param query PromQL выражение
      * @param time момент времени (если null, используется текущее время)
      */
-    fun queryInstant(query: String, time: Instant? = null): Any {
-        val evalTime = time ?: Instant.now()
-        val metricRefs = ExpressionParser.extractMetricReferences(query)
-        val seriesMap = mutableMapOf<String, List<Double>>()
-
-        for (ref in metricRefs) {
-            val key = ref.toKey()
-            if (!seriesMap.containsKey(key)) {
-                val values = loadMetricValuesInstant(ref, evalTime)
-                seriesMap[key] = values
+    fun queryInstant(query: String, time: Instant? = null): MetricResponseModel {
+        val evalTimeMillis = (time ?: Instant.now()).toEpochMilli()
+        return runBlocking {
+            try {
+                val result = engine.newInstantQuery(querier, query, evalTimeMillis)
+                val data = convertToPrometheusData(result.value)
+                MetricResponseModel(status = "success", data = data)
+            } catch (e: Exception) {
+                MetricResponseModel(
+                    status = "error",
+                    error = e.message,
+                    errorType = "execution_error"
+                )
             }
         }
-
-        // Для instant запроса из списка берём последнее значение
-        return when (val result = ExpressionParser.parse(query, seriesMap)) {
-            is List<*> -> result.takeIf { it.isNotEmpty() }?.last()
-            else -> result
-        } ?: Double.NaN
     }
 
     /**
-     * Диапазонный запрос: возвращает матрицу значений на каждом шаге.
+     * Диапазонный запрос – возвращает ответ в формате Prometheus API (matrix).
      * @param query PromQL выражение
      * @param start начальное время
      * @param end конечное время
      * @param step шаг (например, "15s")
      */
-    fun queryRange(query: String, start: Instant, end: Instant, step: Duration): List<RangeQueryResult> {
-        val steps = generateSequence(start) { it.plus(step) }
-            .takeWhile { it <= end }
-            .toList()
-
-        // Для каждого шага выполняем instant запрос
-        return steps.map { stepTime ->
-            val value = queryInstant(query, stepTime)
-            RangeQueryResult(timestamp = stepTime, value = value)
+    fun queryRange(query: String, start: Instant, end: Instant, step: Duration): MetricResponseModel {
+        val startMillis = start.toEpochMilli()
+        val endMillis = end.toEpochMilli()
+        val stepMillis = step.toMillis()
+        return runBlocking {
+            try {
+                val result = engine.newRangeQuery(querier, query, startMillis, endMillis, stepMillis)
+                val data = convertToPrometheusData(result.value)
+                MetricResponseModel(status = "success", data = data)
+            } catch (e: Exception) {
+                MetricResponseModel(
+                    status = "error",
+                    error = e.message,
+                    errorType = "execution_error"
+                )
+            }
         }
     }
 
-    private fun loadMetricValuesInstant(ref: MetricReference, time: Instant): List<Double> {
-        val metrics = when {
-            ref.tags.isEmpty() -> {
-                metricRepository.findByNameBefore(ref.name, time)
+    private fun convertToPrometheusData(value: Value): MetricDataModel {
+        return when (value) {
+            is Value.Vector -> {
+                val results = value.samples.map { sample ->
+                    VectorResultModel(
+                        metric = sample.metric.values,        // Map<String,String>
+                        value = listOf(sample.t / 1000.0, sample.f)
+                    )
+                }
+                MetricDataModel(resultType = "vector", result = results)
             }
 
-            ref.tags.size == 1 -> {
-                val (key, value) = ref.tags.entries.first()
-                metricRepository.findByNameAndTagBefore(ref.name, key, value, time)
+            is Value.Matrix -> {
+                val results = value.series.map { series ->
+                    val values = series.points.map { point ->
+                        listOf(point.t / 1000.0, point.f)
+                    }
+                    MatrixResultModel(
+                        metric = series.metric.values,
+                        values = values
+                    )
+                }
+                MetricDataModel(resultType = "matrix", result = results)
             }
 
-            ref.tags.size == 2 -> {
-                val entries = ref.tags.entries.toList()
-                metricRepository.findByNameAndTwoTagsBefore(
-                    ref.name,
-                    entries[0].key, entries[0].value,
-                    entries[1].key, entries[1].value,
-                    time
+            is Value.Scalar -> {
+                MetricDataModel(
+                    resultType = "scalar",
+                    result = listOf(listOf(value.t / 1000.0, value.v))
                 )
             }
 
-            else -> {
-                // Больше двух тегов - фильтруем в памяти
-                val allMetrics = metricRepository.findByNameBefore(ref.name, time)
-                allMetrics.filter { metric ->
-                    val metricTags = metric.metricTags.associate { it.tagDict.tagKey to it.tagDict.tagValue }
-                    ref.tags.all { (k, v) -> metricTags[k] == v }
-                }
+            is Value.String -> {
+                MetricDataModel(
+                    resultType = "string",
+                    result = listOf(listOf(value.t / 1000.0, value.v))
+                )
             }
         }
-        return metrics.sortedBy { it.timestamp }.map { it.value }
     }
-
-    // Вспомогательный класс для результата range запроса
-    data class RangeQueryResult(val timestamp: Instant, val value: Any)
-
-//    private fun loadMetricValues(ref: MetricReference): List<Double> {
-//        val metrics = if (ref.tags.isEmpty()) {
-//            // Без тегов
-//            if (ref.rangeSeconds != null) {
-//                val cutoff = Instant.now().minusSeconds(ref.rangeSeconds)
-//                metricRepository.findByNameAfter(ref.name, cutoff)
-//            } else {
-//                metricRepository.findByName(ref.name)
-//            }
-//        } else if (ref.tags.size == 1) {
-//            // Один тег
-//            val (key, value) = ref.tags.entries.first()
-//            if (ref.rangeSeconds != null) {
-//                val cutoff = Instant.now().minusSeconds(ref.rangeSeconds)
-//                metricRepository.findByNameAndTagAfter(ref.name, key, value, cutoff)
-//            } else {
-//                metricRepository.findByNameAndTag(ref.name, key, value)
-//            }
-//        } else if (ref.tags.size == 2) {
-//            // Два тега
-//            val entries = ref.tags.entries.toList()
-//            metricRepository.findByNameAndTwoTags(
-//                ref.name,
-//                entries[0].key, entries[0].value,
-//                entries[1].key, entries[1].value
-//            )
-//        } else {
-//            // Больше двух тегов - фильтруем в памяти
-//            val allMetrics = if (ref.rangeSeconds != null) {
-//                val cutoff = Instant.now().minusSeconds(ref.rangeSeconds)
-//                metricRepository.findByNameAfter(ref.name, cutoff)
-//            } else {
-//                metricRepository.findByName(ref.name)
-//            }
-//
-//            allMetrics.filter { metric ->
-//                val metricTags = metric.metricTags.associate {
-//                    it.tagDict.tagKey to it.tagDict.tagValue
-//                }
-//                ref.tags.all { (key, value) -> metricTags[key] == value }
-//            }
-//        }
-//
-//        return metrics.sortedBy { it.timestamp }.map { it.value }
-//    }
 }

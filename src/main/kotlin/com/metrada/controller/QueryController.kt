@@ -1,9 +1,9 @@
 package com.metrada.controller
 
-import com.metrada.model.MatrixResult
-import com.metrada.model.MetricData
-import com.metrada.model.MetricResponse
-import com.metrada.model.VectorResult
+import com.metrada.model.MatrixResultModel
+import com.metrada.model.MetricDataModel
+import com.metrada.model.MetricResponseModel
+import com.metrada.model.VectorResultModel
 import com.metrada.service.MetricQueryService
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RequestMapping
@@ -29,14 +29,15 @@ class QueryController(
     fun instantQuery(
         @RequestParam query: String,
         @RequestParam(required = false) time: String?,
-    ): MetricResponse {
+    ): MetricResponseModel {
         val evalTime = when {
             time == null -> Instant.now()
             time.matches(Regex("\\d+(\\.\\d+)?")) -> Instant.ofEpochSecond(time.toDouble().toLong())
             else -> Instant.parse(time)
         }
-        val result = metricQueryService.queryInstant(query, evalTime)
-        return buildInstantResponse(result, evalTime)
+//        val result = metricQueryService.queryInstant(query, evalTime)
+//        return buildInstantResponse(result, evalTime)
+        return metricQueryService.queryInstant(query, evalTime)
     }
 
     /**
@@ -54,12 +55,13 @@ class QueryController(
         @RequestParam start: String,
         @RequestParam end: String,
         @RequestParam step: String,
-    ): MetricResponse {
+    ): MetricResponseModel {
         val startTime = parseTime(start)
         val endTime = parseTime(end)
         val stepDuration = parseDuration(step)
-        val rangeResults = metricQueryService.queryRange(query, startTime, endTime, stepDuration)
-        return buildRangeResponse(rangeResults)
+//        val rangeResults = metricQueryService.queryRange(query, startTime, endTime, stepDuration)
+//        return buildRangeResponse(rangeResults.data)
+        return metricQueryService.queryRange(query, startTime, endTime, stepDuration)
     }
 
     private fun parseTime(timeStr: String): Instant = when {
@@ -69,13 +71,14 @@ class QueryController(
 
     // ==================== Формирование ответов ====================
 
-    private fun buildInstantResponse(result: Any, evalTime: Instant): MetricResponse {
+    private fun buildInstantResponse(result: Any, evalTime: Instant): MetricResponseModel {
         return when (result) {
             is Double -> {
                 // Скаляр: [timestamp, value]
                 val scalarValue = listOf(evalTime.epochSecond, result)
-                MetricResponse(
-                    data = MetricData(
+                MetricResponseModel(
+                    status = "success",
+                    data = MetricDataModel(
                         resultType = "scalar",
                         result = scalarValue
                     )
@@ -85,13 +88,14 @@ class QueryController(
             is List<*> -> {
                 // Вектор: список объектов с метрикой и значением
                 val vector = listOf(
-                    VectorResult(
+                    VectorResultModel(
                         metric = emptyMap(), // метки можно извлечь из контекста, но для простоты пустые
                         value = listOf(evalTime.epochSecond, result.lastOrNull() ?: Double.NaN)
                     )
                 )
-                MetricResponse(
-                    data = MetricData(
+                MetricResponseModel(
+                    status = "success",
+                    data = MetricDataModel(
                         resultType = "vector",
                         result = vector
                     )
@@ -100,26 +104,27 @@ class QueryController(
 
             else -> {
                 // Неподдерживаемый тип – возвращаем ошибку
-                MetricResponse(
+                MetricResponseModel(
                     status = "error",
-                    data = MetricData(
+                    data = MetricDataModel(
                         resultType = "string",
-                        result = "Unsupported result type: ${result::class.simpleName}"
+                        result = listOf("Unsupported result type: ${result::class.simpleName}")
                     )
                 )
             }
         }
     }
 
-    private fun buildRangeResponse(results: List<MetricQueryService.RangeQueryResult>): MetricResponse {
+    private fun buildRangeResponse(results: MetricDataModel?): MetricResponseModel {
         val matrix = listOf(
-            MatrixResult(
+            MatrixResultModel(
                 metric = emptyMap(),
-                values = results.map { listOf(it.timestamp.epochSecond, it.value) }
+                values = results?.result as List<List<Any>>
             )
         )
-        return MetricResponse(
-            data = MetricData(
+        return MetricResponseModel(
+            status = "success",
+            data = MetricDataModel(
                 resultType = "matrix",
                 result = matrix
             )

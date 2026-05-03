@@ -10,8 +10,21 @@ import java.time.Instant
 
 @Repository
 interface MetricRepository : JpaRepository<MetricEntity, Long> {
-
-    // ==================== Базовые методы поиска ====================
+    @Query(
+        """
+        SELECT m FROM MetricEntity m
+        WHERE m.name = :name
+          AND m.agentId = :agentId
+          AND m.timestamp BETWEEN :start AND :end
+        ORDER BY m.timestamp ASC
+    """
+    )
+    fun findByNameAndAgentAndTimeRange(
+        @Param("name") name: String,
+        @Param("agentId") agentId: String,
+        @Param("start") start: Instant,
+        @Param("end") end: Instant,
+    ): List<MetricEntity>
 
     /**
      * Поиск метрик по имени до указанного времени
@@ -38,7 +51,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         @Param("name") name: String,
         @Param("tagKey") tagKey: String,
         @Param("tagValue") tagValue: String,
-        @Param("time") time: Instant
+        @Param("time") time: Instant,
     ): List<MetricEntity>
 
     /**
@@ -66,7 +79,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         @Param("value1") value1: String,
         @Param("key2") key2: String,
         @Param("value2") value2: String,
-        @Param("time") time: Instant
+        @Param("time") time: Instant,
     ): List<MetricEntity>
 
     /**
@@ -387,7 +400,7 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
     fun findOldMetricIdsForAgent(
         @Param("agentId") agentId: String,
         @Param("olderThan") olderThan: Instant,
-        @Param("limit") limit: Int
+        @Param("limit") limit: Int,
     ): List<Long>
 
 }

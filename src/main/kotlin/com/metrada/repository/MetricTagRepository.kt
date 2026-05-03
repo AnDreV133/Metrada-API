@@ -11,6 +11,17 @@ import java.time.Instant
 
 @Repository
 interface MetricTagRepository : JpaRepository<MetricTagEntity, Long> {
+    @Query("""
+        SELECT mt.metric.id FROM MetricTagEntity mt
+        WHERE mt.tagDict.hash IN :tagHashes
+        GROUP BY mt.metric.id
+        HAVING COUNT(DISTINCT mt.tagDict.id) >= :requiredCount
+    """)
+    fun findMetricIdsByTagHashes(
+        @Param("tagHashes") tagHashes: List<String>,
+        @Param("requiredCount") requiredCount: Long
+    ): List<Long>
+
     /**
      * Удаление orphaned тегов (теги, которые не связаны ни с одной метрикой)
      */

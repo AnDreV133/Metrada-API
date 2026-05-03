@@ -8,6 +8,7 @@ import org.springframework.stereotype.Repository
 
 @Repository
 interface TagDictRepository : JpaRepository<TagDictEntity, Long> {
+    fun findByHash(hash: String): TagDictEntity?
 
     /**
      * Поиск по точной паре ключ-значение
