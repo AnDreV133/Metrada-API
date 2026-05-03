@@ -24,14 +24,14 @@ data class Sample(val metric: Labels, val t: Long, val f: Double, val dropName: 
 
 // Серия – список точек (для матрицы)
 data class Series(val metric: Labels, val points: MutableList<FPoint>, val dropName: Boolean = false)
-data class FPoint(val t: Long, val f: Double)
+data class FPoint(val timestamp: Long, val value: Double)
 
 // Результат выполнения запроса
 sealed class Value {
-    data class Scalar(val t: Long, val v: Double) : Value()
+    data class Scalar(val timestamp: Long, val value: Double) : Value()
     data class Vector(val samples: List<Sample>) : Value()
     data class Matrix(val series: List<Series>) : Value()
-    data class String(val v: kotlin.String, val t: Long) : Value()
+    data class String(val timestamp: Long, val value: kotlin.String) : Value()
 }
 
 // Фильтр по меткам (из парсера)

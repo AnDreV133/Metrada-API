@@ -1,12 +1,12 @@
 package com.metrada.entity.relation
 
 import com.metrada.entity.MetricEntity
-import com.metrada.entity.TagDictEntity
+import com.metrada.entity.LabelDictEntity
 import jakarta.persistence.*
 
 @Entity
-@Table(name = "metric_tags")
-data class MetricTagEntity(
+@Table(name = "metrics_and_labels")
+data class MetricLabelEntity(
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     val id: Long? = null,
@@ -16,6 +16,6 @@ data class MetricTagEntity(
     val metric: MetricEntity,
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "tag_dict_id", nullable = false)
-    val tagDict: TagDictEntity,
+    @JoinColumn(name = "label_dict_id", nullable = false)
+    val labelDict: LabelDictEntity,
 )

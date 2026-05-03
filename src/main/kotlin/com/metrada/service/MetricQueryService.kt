@@ -84,7 +84,7 @@ class MetricQueryService(
             is Value.Matrix -> {
                 val results = value.series.map { series ->
                     val values = series.points.map { point ->
-                        listOf(point.t / 1000.0, point.f)
+                        listOf(point.timestamp / 1000.0, point.value)
                     }
                     MatrixResultModel(
                         metric = series.metric.values,
@@ -97,14 +97,14 @@ class MetricQueryService(
             is Value.Scalar -> {
                 MetricDataModel(
                     resultType = "scalar",
-                    result = listOf(listOf(value.t / 1000.0, value.v))
+                    result = listOf(listOf(value.timestamp / 1000.0, value.value))
                 )
             }
 
             is Value.String -> {
                 MetricDataModel(
                     resultType = "string",
-                    result = listOf(listOf(value.t / 1000.0, value.v))
+                    result = listOf(listOf(value.timestamp / 1000.0, value.value))
                 )
             }
         }

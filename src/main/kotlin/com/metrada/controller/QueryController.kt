@@ -13,7 +13,7 @@ import java.time.Duration
 import java.time.Instant
 
 @RestController
-@RequestMapping("/v1")
+@RequestMapping("/api/v1")
 class QueryController(
     private val metricQueryService: MetricQueryService,
 ) {
@@ -133,14 +133,14 @@ class QueryController(
 
     private fun parseDuration(step: String): Duration {
         // Простейший парсер для строк вида "15s", "1m", "2h", "1d"
-        val value = step.dropLast(1).toLongOrNull()
+        val value = step.trim().dropLast(1).toLongOrNull()
             ?: throw IllegalArgumentException("Invalid step format: $step")
         return when (step.last()) {
             's' -> Duration.ofSeconds(value)
             'm' -> Duration.ofMinutes(value)
             'h' -> Duration.ofHours(value)
             'd' -> Duration.ofDays(value)
-            else -> throw IllegalArgumentException("Unsupported step suffix: ${step.last()}")
+            else -> Duration.ofSeconds(step.toLongOrNull() ?: error("unsuported duration"))
         }
     }
 }

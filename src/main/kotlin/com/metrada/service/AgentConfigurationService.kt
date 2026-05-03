@@ -12,15 +12,18 @@ import java.time.Instant
 class AgentConfigurationService(
     private val agentRepository: AgentRepository,
 ) {
+    init {
+        initializeDefaultAgents()
+    }
 
     /**
      * Инициализация агентов по умолчанию (только если БД пуста)
      */
     @Transactional
-    fun initializeDefaultAgents() {
+    private fun initializeDefaultAgents() {
         if (agentRepository.count() == 0L) {
             val defaultAgent = AgentEntity(
-                id = "agent-1",
+                id = "agent-default",
                 host = "localhost",
                 port = 9182,
                 path = "/metrics",

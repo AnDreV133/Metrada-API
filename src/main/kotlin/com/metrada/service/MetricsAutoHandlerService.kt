@@ -1,17 +1,14 @@
 package com.metrada.service
 
-import com.metrada.util.chunked
 import com.metrada.client.AgentScraperClient
 import com.metrada.entity.AgentEntity
+import com.metrada.entity.LabelDictEntity
 import com.metrada.entity.MetricEntity
-import com.metrada.entity.TagDictEntity
-import com.metrada.entity.relation.MetricTagEntity
+import com.metrada.entity.relation.MetricLabelEntity
 import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
-import com.metrada.repository.AgentRepository
-import com.metrada.repository.MetricRepository
-import com.metrada.repository.MetricTagRepository
-import com.metrada.repository.TagDictRepository
+import com.metrada.repository.*
+import com.metrada.util.chunked
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,9 +21,9 @@ import java.time.Instant
 class MetricsAutoHandlerService(
     private val agentScraperClient: AgentScraperClient,
     private val metricRepository: MetricRepository,
-    private val tagDictRepository: TagDictRepository,
+    private val labelDictRepository: LabelDictRepository,
     private val agentRepository: AgentRepository,
-    private val metricTagRepository: MetricTagRepository,
+    private val metricLabelRepository: MetricLabelRepository,
     private val workerPool: WorkerPoolService,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -96,19 +93,19 @@ class MetricsAutoHandlerService(
     suspend fun saveMetrics(samples: List<MetricSampleModel>, agent: AgentEntity) {
         try {
             // Собираем все уникальные теги из всех метрик
-            val allTagEntries = samples.flatMap { it.tags.entries }.distinct()
+            val allLabelEntries = samples.flatMap { it.labels.entries }.distinct()
 
             // Находим или создаём теги в словаре
-            val tagDictMap = findOrCreateTagDicts(allTagEntries)
+            val labelDictMap = findOrCreateLabelDicts(allLabelEntries)
 
             // Создаём метрики (без тегов пока)
             val metrics = samples.map { sample ->
                 MetricEntity(
-                    name = sample.name,
                     value = sample.value,
                     timestamp = sample.timestamp ?: Instant.now(),
                     agentId = agent.id,
-                    metricTags = emptyList()  // теги добавим позже
+                    hash = sample.hash,
+                    metricLabels = emptyList()  // теги добавим позже
                 )
             }
 
@@ -116,31 +113,31 @@ class MetricsAutoHandlerService(
             val savedMetrics = metricRepository.saveAll(metrics)
 
             // Создаём связи метрик с тегами
-            val metricTags = mutableListOf<MetricTagEntity>()
+            val metricLabels = mutableListOf<MetricLabelEntity>()
 
             savedMetrics.forEachIndexed { index, metric ->
                 val sample = samples[index]
-                sample.tags.forEach { (key, value) ->
-                    val tagDict = tagDictMap["$key=$value"]
-                    if (tagDict != null) {
-                        metricTags.add(
-                            MetricTagEntity(
+                sample.labels.forEach { (key, value) ->
+                    val labelDict = labelDictMap["$key=$value"]
+                    if (labelDict != null) {
+                        metricLabels.add(
+                            MetricLabelEntity(
                                 metric = metric,
-                                tagDict = tagDict
+                                labelDict = labelDict
                             )
                         )
                     } else {
-                        logger.warn("TagDict not found for $key=$value")
+                        logger.warn("LabelDict not found for $key=$value")
                     }
                 }
             }
 
             // Сохраняем связи метрик с тегами
-            if (metricTags.isNotEmpty()) {
-                metricTagRepository.saveAll(metricTags)
+            if (metricLabels.isNotEmpty()) {
+                metricLabelRepository.saveAll(metricLabels)
             }
 
-            logger.debug("Saved ${savedMetrics.size} metrics with ${metricTags.size} tags from agent ${agent.id}")
+            logger.debug("Saved ${savedMetrics.size} metrics with ${metricLabels.size} labels from agent ${agent.id}")
 
         } catch (e: Exception) {
             logger.error("Failed to save metrics for agent ${agent.id}: ${e.message}", e)
@@ -151,13 +148,13 @@ class MetricsAutoHandlerService(
     /**
      * Находит или создаёт теги в словаре
      */
-    private fun findOrCreateTagDicts(tagEntries: List<Map.Entry<String, String>>): Map<String, TagDictEntity> {
-        val result = mutableMapOf<String, TagDictEntity>()
+    private fun findOrCreateLabelDicts(labelEntries: List<Map.Entry<String, String>>): Map<String, LabelDictEntity> {
+        val result = mutableMapOf<String, LabelDictEntity>()
         val toCreate = mutableListOf<Pair<String, String>>()
 
         // Сначала ищем существующие теги
-        tagEntries.forEach { (key, value) ->
-            val existing = tagDictRepository.findByKeyAndValue(key, value)
+        labelEntries.forEach { (key, value) ->
+            val existing = labelDictRepository.findByKeyAndValue(key, value)
             if (existing != null) {
                 result["$key=$value"] = existing
             } else {
@@ -167,13 +164,13 @@ class MetricsAutoHandlerService(
 
         // Создаём недостающие теги
         if (toCreate.isNotEmpty()) {
-            logger.debug("Creating ${toCreate.size} new tag dictionaries")
-            val newTagDicts = toCreate.map { (key, value) ->
-                TagDictEntity.fromKeyValue(key, value)
+            logger.debug("Creating ${toCreate.size} new label dictionaries")
+            val newLabelDicts = toCreate.map { (key, value) ->
+                LabelDictEntity.fromKeyValue(key, value)
             }
-            val saved = tagDictRepository.saveAll(newTagDicts)
-            saved.forEach { tagDict ->
-                result["${tagDict.tagKey}=${tagDict.tagValue}"] = tagDict
+            val saved = labelDictRepository.saveAll(newLabelDicts)
+            saved.forEach { labelDict ->
+                result["${labelDict.labelKey}=${labelDict.labelValue}"] = labelDict
             }
         }
 

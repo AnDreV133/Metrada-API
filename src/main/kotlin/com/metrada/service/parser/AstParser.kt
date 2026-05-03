@@ -552,30 +552,50 @@ class PromQLParser(private val tokens: List<Token>) {
         return parsePrimaryExpr()
     }
 
+    // ---------- ИСПРАВЛЕННЫЙ parsePrimaryExpr ----------
     private fun parsePrimaryExpr(): Expr {
-        return when (val tok = consume()) {
-            is Token.Number -> NumberLiteral(tok.value, tok.pos)
-            is Token.String -> StringLiteral(tok.literal, tok.pos)
+        val tok = peekOrNull()
+        return when (tok) {
+            is Token.Number -> {
+                consume()
+                NumberLiteral(tok.value, tok.pos)
+            }
+            is Token.String -> {
+                consume()
+                StringLiteral(tok.literal, tok.pos)
+            }
             is Token.Ident -> {
-                if (peek(Token.LeftParen::class)) {
-                    parseCall(tok.name)
+                // Если следующий токен — открывающая скобка, то это вызов функции
+                if (peekNext(Token.LeftParen::class)) {
+                    parseCall()   // имя функции прочитаем внутри
                 } else {
-                    parseVectorSelector(tok.name)
+                    consume()     // потребляем имя метрики
+                    val selector = parseVectorSelector(tok.name)
+                    // Проверяем наличие матричного селектора [5m]
+                    if (peek(Token.LeftBracket::class)) {
+                        consume()
+                        val durTok = expect(Token.Duration::class) as Token.Duration
+                        expect(Token.RightBracket::class)
+                        if (selector !is VectorSelector) error("expected vector selector before range")
+                        return MatrixSelector(selector, durTok.millis, PosRange(selector.pos.start, prevPos()))
+                    }
+                    selector
                 }
             }
-
             is Token.LeftParen -> {
+                consume()
                 val expr = parseBinaryExpr(0)
                 expect(Token.RightParen::class)
                 ParenExpr(expr, PosRange(tok.pos.start, prevPos()))
             }
-
             else -> error("unexpected token: $tok")
         }
     }
 
-    private fun parseCall(name: String): Call {
-        val lparen = expect(Token.LeftParen::class)
+    // ---------- parseCall теперь без параметра ----------
+    private fun parseCall(): Call {
+        val nameToken = expect(Token.Ident::class) as Token.Ident
+        expect(Token.LeftParen::class)
         val args = mutableListOf<Expr>()
         if (!peek(Token.RightParen::class)) {
             do {
@@ -583,20 +603,19 @@ class PromQLParser(private val tokens: List<Token>) {
             } while (peek(Token.Comma::class).also { if (it) consume() })
         }
         val rparen = expect(Token.RightParen::class)
-        val func = Function.functions[name] ?: error("unknown function: $name")
-        return Call(func, args, PosRange(lparen.pos.start, rparen.pos.end))
+        val func = Function.functions[nameToken.name] ?: error("unknown function: ${nameToken.name}")
+        return Call(func, args, PosRange(nameToken.pos.start, rparen.pos.end))
     }
 
+    // ---------- Остальные методы без изменений ----------
     private fun parseVectorSelector(name: String): VectorSelector {
-        var labelMatchers = emptyList<LabelMatcher>()
+        val labelMatchers = mutableListOf<LabelMatcher>()
         if (peek(Token.LeftBrace::class)) {
             consume()
-            labelMatchers = parseLabelMatchers()
+            labelMatchers.addAll(parseLabelMatchers())
+            labelMatchers.add(LabelMatcher(type = MatchTypeEnum.Equal, name = "__name__", value = name))
             expect(Token.RightBrace::class)
         }
-//        else if (name == null) {
-//            error("vector selector must have either metric name or label matchers")
-//        }
         var offset = 0L
         var timestamp: Long? = null
         var startOrEnd = StartOrEnd.NONE
@@ -610,37 +629,22 @@ class PromQLParser(private val tokens: List<Token>) {
                     val dur = expect(Token.Duration::class) as Token.Duration
                     offset = dur.millis
                 }
-
                 is Token.Op -> {
                     if ((tok as Token.Op).type == OpType.EQL && peekNext() is Token.Number) {
-                        consume() // consume '@'
+                        consume()
                         val num = expect(Token.Number::class) as Token.Number
                         timestamp = (num.value * 1000).toLong()
                     } else break
                 }
-
                 is Token.Ident -> {
                     when ((tok as Token.Ident).name) {
-                        "start" -> {
-                            consume(); startOrEnd = StartOrEnd.START
-                        }
-
-                        "end" -> {
-                            consume(); startOrEnd = StartOrEnd.END
-                        }
-
-                        "anchored" -> {
-                            consume(); anchored = true
-                        }
-
-                        "smoothed" -> {
-                            consume(); smoothed = true
-                        }
-
+                        "start" -> { consume(); startOrEnd = StartOrEnd.START }
+                        "end" -> { consume(); startOrEnd = StartOrEnd.END }
+                        "anchored" -> { consume(); anchored = true }
+                        "smoothed" -> { consume(); smoothed = true }
                         else -> break
                     }
                 }
-
                 else -> break
             }
         }
@@ -657,24 +661,24 @@ class PromQLParser(private val tokens: List<Token>) {
     }
 
     private fun parseLabelMatchers(): List<LabelMatcher> {
-        return mutableListOf<LabelMatcher>().apply {
-            do {
-                val label = expect(Token.Ident::class) as Token.Ident
-                val opTok = when (val t = consume()) {
-                    is Token.Op -> t
-                    else -> error("expected operator after label name")
-                }
-                val value = expect(Token.String::class) as Token.String
-                val matchType = when (opTok.type) {
-                    OpType.EQLC -> MatchTypeEnum.Equal
-                    OpType.NEQ -> MatchTypeEnum.NotEqual
-                    OpType.EQL_REGEX -> MatchTypeEnum.Regexp
-                    OpType.NEQ_REGEX -> MatchTypeEnum.NotRegexp
-                    else -> error("invalid label matching operator: ${opTok.type}")
-                }
-                add(LabelMatcher(matchType, label.name, value.literal))
-            } while (peek(Token.Comma::class).also { if (it) consume() })
-        }
+        val result = mutableListOf<LabelMatcher>()
+        do {
+            val label = expect(Token.Ident::class) as Token.Ident
+            val opTok = when (val t = consume()) {
+                is Token.Op -> t
+                else -> error("expected operator after label name")
+            }
+            val value = expect(Token.String::class) as Token.String
+            val matchType = when (opTok.type) {
+                OpType.EQLC -> MatchTypeEnum.Equal
+                OpType.NEQ -> MatchTypeEnum.NotEqual
+                OpType.EQL_REGEX -> MatchTypeEnum.Regexp
+                OpType.NEQ_REGEX -> MatchTypeEnum.NotRegexp
+                else -> error("invalid label matching operator: ${opTok.type}")
+            }
+            result.add(LabelMatcher(matchType, label.name, value.literal))
+        } while (peek(Token.Comma::class).also { if (it) consume() })
+        return result
     }
 
     private fun parseVectorMatching(): VectorMatching? {
@@ -727,6 +731,7 @@ class PromQLParser(private val tokens: List<Token>) {
     private fun peek(tokenClass: KClass<out Token>): Boolean = peekOrNull()?.javaClass == tokenClass.java
     private fun peekOrNull(): Token? = if (pos < tokens.size) tokens[pos] else null
     private fun peekNext(): Token? = if (pos + 1 < tokens.size) tokens[pos + 1] else null
+    private fun peekNext(tokenClass: KClass<out Token>): Boolean = peekNext()?.javaClass == tokenClass.java
     private fun current(): Token = tokens[pos]
     private fun consume(): Token = tokens[pos++]
     private fun expect(tokenClass: KClass<out Token>): Token {
@@ -740,7 +745,6 @@ class PromQLParser(private val tokens: List<Token>) {
     private fun startPos(): Int = if (pos < tokens.size) tokens[pos].pos.start else 0
     private fun prevPos(): Int = if (pos > 0) tokens[pos - 1].pos.end else 0
 }
-
 // ============================================================
 // Part 6: Public API entry point
 // ============================================================

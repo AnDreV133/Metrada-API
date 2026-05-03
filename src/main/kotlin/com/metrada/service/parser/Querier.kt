@@ -1,89 +1,86 @@
 package com.metrada.service.parser
 
-import com.metrada.entity.TagDictEntity
+import com.metrada.entity.LabelDictEntity
 import com.metrada.repository.MetricRepository
-import com.metrada.repository.MetricTagRepository
-import com.metrada.repository.TagDictRepository
+import com.metrada.repository.MetricLabelRepository
+import com.metrada.repository.LabelDictRepository
 import org.springframework.stereotype.Component
 import java.time.Instant
 
 @Component
 class Querier(
     private val metricRepository: MetricRepository,
-    private val metricTagRepository: MetricTagRepository,
-    private val tagDictRepository: TagDictRepository,
+    private val metricLabelRepository: MetricLabelRepository,
+    private val labelDictRepository: LabelDictRepository,
 ) {
 
     suspend fun select(mint: Long, maxt: Long, matchers: List<LabelMatcher>): ISeriesSet {
-        // 1. Разбираем matchers на имя метрики, agentId, и теги
-        var metricName: String? = null
-        var agentId: String? = null
-        val tagConditions = mutableMapOf<String, String>() // key -> value
+        // 1. Разбираем matchers на обязательные лейблы и возможные условия (=, =~, !=, !~)
+        val requiredLabels = mutableMapOf<String, String>()   // для точных равенств
+        val regexLabels = mutableListOf<Pair<String, Regex>>() // для =~
+        val negateLabels = mutableListOf<Pair<String, String>>() // для !=
+        val negateRegex = mutableListOf<Pair<String, Regex>>() // для !~
 
         for (m in matchers) {
-            // Поддерживаем только точное равенство (MatchType.Equal) для простоты
-            if (m.type != MatchTypeEnum.Equal) continue
-            when (m.name) {
-                "__name__" -> metricName = m.value
-                "instance" -> agentId = m.value
-                else -> tagConditions[m.name] = m.value
+            when (m.type) {
+                MatchTypeEnum.Equal -> requiredLabels[m.name] = m.value
+                MatchTypeEnum.Regexp -> regexLabels.add(m.name to m.value.toRegex())
+                MatchTypeEnum.NotEqual -> negateLabels.add(m.name to m.value)
+                MatchTypeEnum.NotRegexp -> negateRegex.add(m.name to m.value.toRegex())
             }
         }
 
-        if (metricName == null) error("metric name (__name__) is required")
-        if (agentId == null) error("agent label is required")
+        // 2. Получаем хэши для обязательных лейблов (из LabelDictEntity)
+        val requiredHashes = requiredLabels.map { (k, v) -> LabelDictEntity.generateHash(k, v) }
 
-        // 2. Находим ID серий (metrics), удовлетворяющих тегам
-        val tagHashes = tagConditions.map { (k, v) ->
-            TagDictEntity.generateHash(k, v)
-        }
-        val metricIds = if (tagHashes.isNotEmpty()) {
-            metricTagRepository.findMetricIdsByTagHashes(tagHashes, tagHashes.size.toLong())
+        // 3. Находим ID метрик, которые содержат все обязательные лейблы
+        val metricIds = if (requiredHashes.isNotEmpty()) {
+            // Запрос: метрики, у которых есть все указанные хэши (HAVING COUNT = количеству хэшей)
+            metricLabelRepository.findMetricIdsByHashes(requiredHashes, requiredHashes.size)
         } else {
-            // Если нет тегов – все метрики с таким именем и агентом
-            metricRepository.findByNameAndAgentAndTimeRange(
-                metricName,
-                agentId,
-                Instant.ofEpochMilli(mint),
-                Instant.ofEpochMilli(maxt)
-            )
-                .map { it.id!! }.distinct()
+            // Если нет обязательных лейблов – пока пустой список, дальше загрузим по времени но без фильтра по лейблам неэффективно
+            // Можно вернуть все метрики, но лучше ограничить временем.
+            emptyList()
         }
 
-        // 3. Загружаем все точки для отобранных metricId в диапазоне времени
-        val entities = metricRepository.findAllById(metricIds)
-            .filter {
-                it.name == metricName
-                        && it.agentId == agentId
-                        && it.timestamp in Instant.ofEpochMilli(mint)..Instant.ofEpochMilli(maxt)
-            }
-            .sortedBy { it.timestamp }
+        // 4. Загружаем метрики по найденным ID и временному диапазону
+        val entities = if (metricIds.isNotEmpty()) {
+            metricRepository.findAllByIdAndTimeRange(metricIds, Instant.ofEpochMilli(mint), Instant.ofEpochMilli(maxt))
+        } else {
+            // Если нет обязательных лейблов, можно загрузить все метрики в диапазоне,
+            // но тогда нужно будет вручную фильтровать по лейблам в памяти (медленно).
+            // Лучше иметь возможность загружать без обязательных лейблов – тогда используем другой метод.
+            emptyList()
+        }
 
-        // 4. Группируем по метрике + тегам (формируем Labels)
+        // 5. Применяем дополнительные фильтры (=~, !=, !~) в памяти
+        val filteredEntities = entities.filter { metric ->
+            // Получаем все лейблы метрики (можно загрузить одним запросом для всех метрик, но здесь упрощённо)
+            val labels = metric.metricLabels.associate { it.labelDict.labelKey to it.labelDict.labelValue }
+            // Должны выполняться все условия
+            regexLabels.all { (key, regex) -> regex.matches(labels[key] ?: "") } &&
+                    negateLabels.all { (key, value) -> labels[key] != value } &&
+                    negateRegex.all { (key, regex) -> !regex.matches(labels[key] ?: "") }
+        }
+
+        // 6. Группировка в серии по всем лейблам
         val seriesMap = mutableMapOf<Labels, MutableList<FPoint>>()
-        for (e in entities) {
-            // Загружаем теги этой метрики (можно лениво, здесь упрощённо)
-            val tags = e.metricTags.associate { it.tagDict.tagKey to it.tagDict.tagValue }
-            val labels = Labels(tags + ("__name__" to e.name) + ("instance" to e.agentId))
+        for (e in filteredEntities.sortedBy { it.timestamp }) {
+            val labelsMap = e.metricLabels.associate { it.labelDict.labelKey to it.labelDict.labelValue }
             val point = FPoint(e.timestamp.toEpochMilli(), e.value)
-            seriesMap.getOrPut(labels) { mutableListOf() }.add(point)
+            seriesMap.getOrPut(Labels(labelsMap)) { mutableListOf() }.add(point)
         }
 
-        // 5. Сортируем точки внутри каждой серии по времени
-        for (points in seriesMap.values) {
-            points.sortBy { it.t }
-        }
-
+        // 7. Сортировка и преобразование в итераторы (аналогично предыдущей версии)
         val seriesList = seriesMap.map { (labels, points) ->
             object : IStorageSeries {
                 override fun labels() = labels
                 override fun iterator() = object : ISeriesIterator {
                     private var idx = 0
                     override fun seek(ts: Long): Boolean {
-                        idx = points.binarySearch { it.t.compareTo(ts) }.let { if (it < 0) -it - 1 else it }
+                        idx = points.binarySearch { it.timestamp.compareTo(ts) }.let { if (it < 0) -it - 1 else it }
                         return idx < points.size
                     }
-
                     override fun next(): Boolean = (++idx) < points.size
                     override fun at(): FPoint = points[idx]
                     override fun error(): Throwable? = null

@@ -13,7 +13,7 @@ class Evaluator(
 
     suspend fun eval(expr: Expr): Value = when (expr) {
         is NumberLiteral -> Value.Scalar(startTs, expr.value)
-        is StringLiteral -> Value.String(expr.value, startTs)
+        is StringLiteral -> Value.String(startTs, expr.value)
         is VectorSelector -> evalVectorSelector(expr)
         is MatrixSelector -> evalMatrixSelector(expr)
         is AggregateExpr -> evalAggregate(expr)
@@ -23,7 +23,6 @@ class Evaluator(
         is UnaryExpr -> evalUnary(expr)
         is SubqueryExpr -> evalSubquery(expr)
         is StepInvariantExpr -> evalStepInvariant(expr)
-        else -> error("unsupported expr: ${expr::class}")
     }
 
     // -------- Векторный селектор (мгновенный) ----------
@@ -62,8 +61,8 @@ class Evaluator(
         var found = it.seek(mint - offset)
         while (found) {
             val pt = it.at()
-            if (pt.t > maxt - offset) break
-            result.add(FPoint(pt.t + offset, pt.f))
+            if (pt.timestamp > maxt - offset) break
+            result.add(FPoint(pt.timestamp + offset, pt.value))
             found = it.next()
         }
         currentSamples += result.size
@@ -125,19 +124,19 @@ class Evaluator(
                 val acc = accum[groupIdx]
                 acc.count++
                 when (agg.op) {
-                    AggrOp.SUM -> acc.sum += point.f
-                    AggrOp.AVG -> { acc.sum += point.f; acc.avgCount++ }
+                    AggrOp.SUM -> acc.sum += point.value
+                    AggrOp.AVG -> { acc.sum += point.value; acc.avgCount++ }
                     AggrOp.COUNT -> acc.countVal++
-                    AggrOp.MIN -> acc.min = min(acc.min, point.f)
-                    AggrOp.MAX -> acc.max = max(acc.max, point.f)
+                    AggrOp.MIN -> acc.min = min(acc.min, point.value)
+                    AggrOp.MAX -> acc.max = max(acc.max, point.value)
                     AggrOp.TOPK -> {
                         val k = (agg.param as? NumberLiteral)?.value?.toInt() ?: 1
-                        acc.topKHeap.add(point.f)
+                        acc.topKHeap.add(point.value)
                         if (acc.topKHeap.size > k) acc.topKHeap.remove()
                     }
                     AggrOp.BOTTOMK -> {
                         val k = (agg.param as? NumberLiteral)?.value?.toInt() ?: 1
-                        acc.bottomKHeap.add(point.f)
+                        acc.bottomKHeap.add(point.value)
                         if (acc.bottomKHeap.size > k) acc.bottomKHeap.remove()
                     }
                     else -> {}
@@ -167,7 +166,7 @@ class Evaluator(
     private fun getPointAtTime(series: Series, ts: Long): FPoint? {
         // Предполагаем, что точки отсортированы по времени и мы потребляем их последовательно (в реальном evaluator нужно хранить позицию)
         // Упрощённо: линейный поиск (в реальном проекте используйте итератор)
-        return series.points.find { it.t == ts }
+        return series.points.find { it.timestamp == ts }
     }
 
     private fun computeGroupKey(metric: Labels, grouping: List<String>, without: Boolean): Long {
@@ -210,10 +209,10 @@ class Evaluator(
             if (points.size < 2) continue
             val newPoints = mutableListOf<FPoint>()
             for (i in 1 until points.size) {
-                val dt = points[i].t - points[i-1].t // ms
+                val dt = points[i].timestamp - points[i-1].timestamp // ms
                 if (dt <= 0) continue
-                val rate = (points[i].f - points[i-1].f) * 1000.0 / dt
-                newPoints.add(FPoint(points[i].t, rate))
+                val rate = (points[i].value - points[i-1].value) * 1000.0 / dt
+                newPoints.add(FPoint(points[i].timestamp, rate))
             }
             result.add(Series(series.metric, newPoints))
         }
@@ -226,8 +225,8 @@ class Evaluator(
         for (series in matrix.series) {
             val points = series.points
             if (points.size < 2) continue
-            val increase = points.last().f - points.first().f
-            result.add(Series(series.metric, mutableListOf(FPoint(points.last().t, increase))))
+            val increase = points.last().value - points.first().value
+            result.add(Series(series.metric, mutableListOf(FPoint(points.last().timestamp, increase))))
         }
         return Value.Matrix(result)
     }
@@ -253,14 +252,14 @@ class Evaluator(
     private suspend fun evalUnaryFloatOp(arg: Expr, op: (Double) -> Double): Value {
         val inner = eval(arg)
         return when (inner) {
-            is Value.Scalar -> Value.Scalar(inner.t, op(inner.v))
+            is Value.Scalar -> Value.Scalar(inner.timestamp, op(inner.value))
             is Value.Vector -> {
                 val samples = inner.samples.map { it.copy(f = op(it.f)) }
                 Value.Vector(samples)
             }
             is Value.Matrix -> {
                 val series = inner.series.map { s ->
-                    Series(s.metric, s.points.map { p -> FPoint(p.t, op(p.f)) }.toMutableList())
+                    Series(s.metric, s.points.map { p -> FPoint(p.timestamp, op(p.value)) }.toMutableList())
                 }
                 Value.Matrix(series)
             }
@@ -274,19 +273,19 @@ class Evaluator(
         val rhs = eval(bin.rhs)
         return when {
             lhs is Value.Scalar && rhs is Value.Scalar -> {
-                val v = scalarBinop(bin.op, lhs.v, rhs.v)
-                Value.Scalar(max(lhs.t, rhs.t), v)
+                val v = scalarBinop(bin.op, lhs.value, rhs.value)
+                Value.Scalar(max(lhs.timestamp, rhs.timestamp), v)
             }
             lhs is Value.Vector && rhs is Value.Scalar -> {
                 val samples = lhs.samples.map { s ->
-                    val v = scalarBinop(bin.op, s.f, rhs.v)
+                    val v = scalarBinop(bin.op, s.f, rhs.value)
                     s.copy(f = v)
                 }
                 Value.Vector(samples)
             }
             lhs is Value.Scalar && rhs is Value.Vector -> {
                 val samples = rhs.samples.map { s ->
-                    val v = scalarBinop(bin.op, lhs.v, s.f)
+                    val v = scalarBinop(bin.op, lhs.value, s.f)
                     s.copy(f = v)
                 }
                 Value.Vector(samples)
@@ -327,10 +326,10 @@ class Evaluator(
         val inner = eval(unary.expr)
         return when (unary.op) {
             OpType.SUB -> when (inner) {
-                is Value.Scalar -> Value.Scalar(inner.t, -inner.v)
+                is Value.Scalar -> Value.Scalar(inner.timestamp, -inner.value)
                 is Value.Vector -> Value.Vector(inner.samples.map { it.copy(f = -it.f) })
                 is Value.Matrix -> Value.Matrix(inner.series.map { s ->
-                    Series(s.metric, s.points.map { p -> FPoint(p.t, -p.f) }.toMutableList())
+                    Series(s.metric, s.points.map { p -> FPoint(p.timestamp, -p.value) }.toMutableList())
                 })
                 else -> error("unsupported unary -")
             }

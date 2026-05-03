@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.*
 import java.time.Instant
 
 @RestController
-@RequestMapping("/v1/agents")
+@RequestMapping("/api/v1/agents")
 class AgentController(
     private val agentConfigurationService: AgentConfigurationService,
     private val metricsAutoHandlerService: MetricsAutoHandlerService

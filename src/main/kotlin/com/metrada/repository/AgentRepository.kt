@@ -13,8 +13,8 @@ import java.time.Instant
 @Repository
 interface AgentRepository : JpaRepository<AgentEntity, String> {
     // Поиск метрик агента через прямой запрос (не через связь)
-    @Query("SELECT m FROM MetricEntity m WHERE m.agentId = :agentId")
-    fun findMetricsByAgentId(@Param("agentId") agentId: String): List<MetricEntity>
+//    @Query("SELECT m FROM MetricEntity m WHERE m.agentId = :agentId")
+//    fun findMetricsByAgentId(@Param("agentId") agentId: String): List<MetricEntity>
 
     /**
      * Найти всех активных агентов (enabled = true)

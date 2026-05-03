@@ -3,7 +3,6 @@ package com.metrada.client
 import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.reactive.awaitFirstOrNull
 import org.slf4j.LoggerFactory
@@ -65,16 +64,17 @@ class AgentScraperClient {
                         val value = parts[1].toDouble()
 
                         val (name, tags) = parseMetricNameAndTags(namePart)
+                        val labels = tags + mapOf(
+                            "__name__" to name,
+                            "instance" to agent.id
+                        )
 
                         emit(
                             MetricSampleModel(
-                                name = name,
                                 value = value,
                                 timestamp = currentTimestamp,
-                                tags = tags + mapOf(
-                                    "__name__" to name,
-                                    "instance" to agent.id
-                                )
+                                labels = labels,
+                                hash = labels.hashCode()
                             )
                         )
                     }

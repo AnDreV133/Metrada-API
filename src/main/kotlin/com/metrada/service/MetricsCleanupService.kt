@@ -2,7 +2,7 @@ package com.metrada.service
 
 import com.metrada.repository.AgentRepository
 import com.metrada.repository.MetricRepository
-import com.metrada.repository.MetricTagRepository
+import com.metrada.repository.MetricLabelRepository
 import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.*
@@ -16,7 +16,7 @@ import kotlin.time.Duration.Companion.hours
 @Service
 class MetricsCleanupService(
     private val metricRepository: MetricRepository,
-    private val metricTagRepository: MetricTagRepository,
+    private val metricLabelRepository: MetricLabelRepository,
     private val agentRepository: AgentRepository,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -141,7 +141,7 @@ class MetricsCleanupService(
 
         try {
             while (true) {
-                val deleted = metricTagRepository.deleteOrphanedTags(batchSize)
+                val deleted = metricLabelRepository.deleteAllOrphanedTags()
                 if (deleted == 0) break
                 totalDeleted += deleted
                 logger.debug("Deleted $deleted orphaned tags (total: $totalDeleted)")
