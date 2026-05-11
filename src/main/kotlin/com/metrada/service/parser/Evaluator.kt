@@ -9,6 +9,7 @@ class Evaluator(
     private val endTs: Long,
     private val interval: Long,
 ) {
+
     private var currentSamples = 0
 
     suspend fun eval(expr: Expr): Value = when (expr) {
@@ -43,7 +44,7 @@ class Evaluator(
     // -------- Матричный селектор (диапазонный) ----------
     private suspend fun evalMatrixSelector(sel: MatrixSelector): Value.Matrix {
         val vs = sel.vectorSelector
-        val (mint, maxt) = calculateTimeRangeForMatrix(vs, sel.range)
+        val (mint, maxt) = calculateTimeRange(vs)
         val seriesSet = querier.select(mint, maxt, vs.labelMatchers)
         val matrix = mutableListOf<Series>()
         while (seriesSet.next()) {
@@ -87,9 +88,10 @@ class Evaluator(
     }
 
     private fun calculateTimeRangeForMatrix(vs: VectorSelector, range: Long): Pair<Long, Long> {
-        val (_, end) = calculateTimeRange(vs)
-        val start = end - range
-        return start to end
+//        val (_, end) = calculateTimeRange(vs)
+//        val start = end - range
+//        return start to end
+        return calculateTimeRange(vs)
     }
 
     // -------- Агрегации (sum, avg, count, min, max, topk, bottomk) ----------
@@ -189,52 +191,80 @@ class Evaluator(
 
     private suspend fun evalRate(ms: MatrixSelector): Value {
         val matrix = eval(ms) as Value.Matrix
-        val result = mutableListOf<Series>()
-        for (series in matrix.series) {
-            val points = series.points
-            if (points.size < 2) continue
-            val newPoints = mutableListOf<FPoint>()
-            for (i in 1 until points.size) {
-                val dt = points[i].timestamp - points[i - 1].timestamp // ms
+        val range = ms.range
+        val numSteps = ((endTs - startTs) / interval).toInt().coerceAtLeast(1)
+        val resultMap = mutableMapOf<Labels, MutableList<FPoint>>()
+
+        for (stepIdx in 0 until numSteps) {
+            val ts = startTs + stepIdx * interval
+            val windowStart = ts - range
+
+            for (series in matrix.series) {
+                val points = series.points
+                val windowPoints = points.filter { it.timestamp in windowStart..ts }
+                if (windowPoints.size < 2) continue
+                val first = windowPoints.first()
+                val last = windowPoints.last()
+                val dt = (last.timestamp - first.timestamp).toDouble() / 1000.0
                 if (dt <= 0) continue
-                val rate = (points[i].value - points[i - 1].value) * 1000.0 / dt
-                newPoints.add(FPoint(points[i].timestamp, rate))
+                val rateValue = (last.value - first.value) / dt
+                resultMap.getOrPut(series.labels) { mutableListOf() }.add(FPoint(ts, rateValue))
             }
-            result.add(Series(series.labels, newPoints))
         }
+
+        val result = resultMap.map { (labels, points) -> Series(labels, points.toMutableList()) }
         return Value.Matrix(result)
     }
 
     private suspend fun evalIrate(ms: MatrixSelector): Value {
         val matrix = eval(ms) as Value.Matrix
-        val result = mutableListOf<Series>()
-        for (series in matrix.series) {
-            val points = series.points
-            if (points.size < 2) continue
-            val newPoints = mutableListOf<FPoint>()
-            // Вычисляем irate для каждой последовательной пары точек
-            for (i in 1 until points.size) {
-                val p1 = points[i - 1]
-                val p2 = points[i]
-                val dt = (p2.timestamp - p1.timestamp).toDouble() / 1000.0 // seconds
+        val range = ms.range
+        val numSteps = ((endTs - startTs) / interval).toInt().coerceAtLeast(1)
+        val resultMap = mutableMapOf<Labels, MutableList<FPoint>>()
+
+        for (stepIdx in 0 until numSteps) {
+            val ts = startTs + stepIdx * interval
+            val windowStart = ts - range
+
+            for (series in matrix.series) {
+                val points = series.points
+                val windowPoints = points.filter { it.timestamp in windowStart..ts }
+                if (windowPoints.size < 2) continue
+                val prev = windowPoints[windowPoints.size - 2]
+                val last = windowPoints.last()
+                val dt = (last.timestamp - prev.timestamp).toDouble() / 1000.0
                 if (dt <= 0) continue
-                val rate = (p2.value - p1.value) / dt
-                newPoints.add(FPoint(p2.timestamp, rate))
+                val irateValue = (last.value - prev.value) / dt
+                resultMap.getOrPut(series.labels) { mutableListOf() }.add(FPoint(ts, irateValue))
             }
-            result.add(Series(series.labels, newPoints))
         }
+
+        val result = resultMap.map { (labels, points) -> Series(labels, points.toMutableList()) }
         return Value.Matrix(result)
     }
 
     private suspend fun evalIncrease(ms: MatrixSelector): Value {
         val matrix = eval(ms) as Value.Matrix
-        val result = mutableListOf<Series>()
-        for (series in matrix.series) {
-            val points = series.points
-            if (points.size < 2) continue
-            val increase = points.last().value - points.first().value
-            result.add(Series(series.labels, mutableListOf(FPoint(points.last().timestamp, increase))))
+        val range = ms.range
+        val numSteps = ((endTs - startTs) / interval).toInt().coerceAtLeast(1)
+        val resultMap = mutableMapOf<Labels, MutableList<FPoint>>()
+
+        for (stepIdx in 0 until numSteps) {
+            val ts = startTs + stepIdx * interval
+            val windowStart = ts - range
+
+            for (series in matrix.series) {
+                val points = series.points
+                val windowPoints = points.filter { it.timestamp in windowStart..ts }
+                if (windowPoints.size < 2) continue
+                val first = windowPoints.first()
+                val last = windowPoints.last()
+                val increaseValue = last.value - first.value
+                resultMap.getOrPut(series.labels) { mutableListOf() }.add(FPoint(ts, increaseValue))
+            }
         }
+
+        val result = resultMap.map { (labels, points) -> Series(labels, points.toMutableList()) }
         return Value.Matrix(result)
     }
 

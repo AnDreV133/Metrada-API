@@ -17,7 +17,6 @@ import java.time.Instant
 class QueryController(
     private val metricQueryService: MetricQueryService,
 ) {
-
     /**
      * Instant query – возвращает значение на указанный момент времени.
      * GET /v1/query?query=<expr>&time=<timestamp>
@@ -35,9 +34,7 @@ class QueryController(
             time.matches(Regex("\\d+(\\.\\d+)?")) -> Instant.ofEpochSecond(time.toDouble().toLong())
             else -> Instant.parse(time)
         }
-//        val result = metricQueryService.queryInstant(query, evalTime)
-//        return buildInstantResponse(result, evalTime)
-        return metricQueryService.queryInstant(query, evalTime)
+        return metricQueryService.queryInstant(cleanQuery(query), evalTime)
     }
 
     /**
@@ -59,9 +56,7 @@ class QueryController(
         val startTime = parseTime(start)
         val endTime = parseTime(end)
         val stepDuration = parseDuration(step)
-//        val rangeResults = metricQueryService.queryRange(query, startTime, endTime, stepDuration)
-//        return buildRangeResponse(rangeResults.data)
-        return metricQueryService.queryRange(query, startTime, endTime, stepDuration)
+        return metricQueryService.queryRange(cleanQuery(query), startTime, endTime, stepDuration)
     }
 
     private fun parseTime(timeStr: String): Instant = when {
@@ -69,67 +64,6 @@ class QueryController(
         else -> Instant.parse(timeStr)
     }
 
-    // ==================== Формирование ответов ====================
-
-    private fun buildInstantResponse(result: Any, evalTime: Instant): MetricResponseModel {
-        return when (result) {
-            is Double -> {
-                // Скаляр: [timestamp, value]
-                val scalarValue = listOf(evalTime.epochSecond, result)
-                MetricResponseModel(
-                    status = "success",
-                    data = MetricDataModel(
-                        resultType = "scalar",
-                        result = scalarValue
-                    )
-                )
-            }
-
-            is List<*> -> {
-                // Вектор: список объектов с метрикой и значением
-                val vector = listOf(
-                    VectorResultModel(
-                        metric = emptyMap(), // метки можно извлечь из контекста, но для простоты пустые
-                        value = listOf(evalTime.epochSecond, result.lastOrNull() ?: Double.NaN)
-                    )
-                )
-                MetricResponseModel(
-                    status = "success",
-                    data = MetricDataModel(
-                        resultType = "vector",
-                        result = vector
-                    )
-                )
-            }
-
-            else -> {
-                // Неподдерживаемый тип – возвращаем ошибку
-                MetricResponseModel(
-                    status = "error",
-                    data = MetricDataModel(
-                        resultType = "string",
-                        result = listOf("Unsupported result type: ${result::class.simpleName}")
-                    )
-                )
-            }
-        }
-    }
-
-    private fun buildRangeResponse(results: MetricDataModel?): MetricResponseModel {
-        val matrix = listOf(
-            MatrixResultModel(
-                metric = emptyMap(),
-                values = results?.result as List<List<Any>>
-            )
-        )
-        return MetricResponseModel(
-            status = "success",
-            data = MetricDataModel(
-                resultType = "matrix",
-                result = matrix
-            )
-        )
-    }
 
     private fun parseDuration(step: String): Duration {
         // Простейший парсер для строк вида "15s", "1m", "2h", "1d"
@@ -142,5 +76,9 @@ class QueryController(
             'd' -> Duration.ofDays(value)
             else -> Duration.ofSeconds(step.toLongOrNull() ?: error("unsuported duration"))
         }
+    }
+
+    fun cleanQuery(query: String): String {
+        return query.replace("\uFEFF", "")
     }
 }
