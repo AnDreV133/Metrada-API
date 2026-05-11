@@ -7,7 +7,6 @@ import kotlin.reflect.KClass
 // ============================================================
 
 
-
 // ============================================================
 // Part 2: Tokens
 // ============================================================
@@ -127,6 +126,7 @@ data class Function(
     companion object {
         val functions = mapOf(
             "rate" to Function("rate", listOf(ValueTypeEnum.Matrix), ValueTypeEnum.Vector),
+            "irate" to Function("irate", listOf(ValueTypeEnum.Matrix), ValueTypeEnum.Vector),
             "increase" to Function("increase", listOf(ValueTypeEnum.Matrix), ValueTypeEnum.Vector),
             "sum" to Function("sum", listOf(ValueTypeEnum.Vector), ValueTypeEnum.Vector),
             "avg" to Function("avg", listOf(ValueTypeEnum.Vector), ValueTypeEnum.Vector),
@@ -497,6 +497,10 @@ class Lexer(private val input: String) {
 
 class PromQLParser(private val tokens: List<Token>) {
     private var pos = 0
+    private val aggregateOps = setOf(
+        "sum", "avg", "count", "min", "max", "stddev", "stdvar",
+        "quantile", "topk", "bottomk", "limitk", "limit_ratio", "count_values"
+    )
 
     companion object {
         fun parse(input: String): Expr {
@@ -523,7 +527,7 @@ class PromQLParser(private val tokens: List<Token>) {
             val precedence = opPrecedence(opTok.type)
             if (precedence < minPrecedence) break
             consume()
-            var rhs = parseBinaryExpr(precedence + 1)
+            val rhs = parseBinaryExpr(precedence + 1)
             val matching = if (opTok.type in setOf(
                     OpType.ADD, OpType.SUB, OpType.MUL, OpType.DIV, OpType.POW, OpType.MOD,
                     OpType.EQLC, OpType.NEQ, OpType.GTR, OpType.LSS, OpType.GTE, OpType.LTE,
@@ -552,47 +556,98 @@ class PromQLParser(private val tokens: List<Token>) {
         return parsePrimaryExpr()
     }
 
-    // ---------- ИСПРАВЛЕННЫЙ parsePrimaryExpr ----------
     private fun parsePrimaryExpr(): Expr {
-        val tok = peekOrNull()
-        return when (tok) {
+        return when (val tok = peekOrNull()) {
             is Token.Number -> {
                 consume()
                 NumberLiteral(tok.value, tok.pos)
             }
+
             is Token.String -> {
                 consume()
                 StringLiteral(tok.literal, tok.pos)
             }
+
             is Token.Ident -> {
-                // Если следующий токен — открывающая скобка, то это вызов функции
-                if (peekNext(Token.LeftParen::class)) {
-                    parseCall()   // имя функции прочитаем внутри
-                } else {
-                    consume()     // потребляем имя метрики
-                    val selector = parseVectorSelector(tok.name)
-                    // Проверяем наличие матричного селектора [5m]
-                    if (peek(Token.LeftBracket::class)) {
-                        consume()
-                        val durTok = expect(Token.Duration::class) as Token.Duration
-                        expect(Token.RightBracket::class)
-                        if (selector !is VectorSelector) error("expected vector selector before range")
-                        return MatrixSelector(selector, durTok.millis, PosRange(selector.pos.start, prevPos()))
-                    }
-                    selector
+                val name = tok.name
+                // 1. Агрегации (sum, avg, count, min, max, stddev, stdvar, quantile, topk, bottomk, ...)
+                if (name in aggregateOps) {
+                    return parseAggregateExpr()
                 }
+                // 2. Вызов функции (например, rate, increase)
+                if (peekNext(Token.LeftParen::class)) {
+                    return parseCall()
+                }
+                // 3. Векторный селектор (имя метрики)
+                consume()
+                val selector = parseVectorSelector(name)
+                if (peek(Token.LeftBracket::class)) {
+                    consume()
+                    val durTok = expect(Token.Duration::class) as Token.Duration
+                    expect(Token.RightBracket::class)
+                    if (selector !is VectorSelector) error("expected vector selector before range")
+                    return MatrixSelector(selector, durTok.millis, PosRange(selector.pos.start, prevPos()))
+                }
+                selector
             }
+
             is Token.LeftParen -> {
                 consume()
                 val expr = parseBinaryExpr(0)
                 expect(Token.RightParen::class)
                 ParenExpr(expr, PosRange(tok.pos.start, prevPos()))
             }
+
             else -> error("unexpected token: $tok")
         }
     }
 
-    // ---------- parseCall теперь без параметра ----------
+    private fun parseAggregateExpr(): AggregateExpr {
+        val opTok = consume() as Token.Ident
+        val op = when (opTok.name) {
+            "sum" -> AggrOp.SUM
+            "avg" -> AggrOp.AVG
+            "count" -> AggrOp.COUNT
+            "min" -> AggrOp.MIN
+            "max" -> AggrOp.MAX
+            "stddev" -> AggrOp.STDDEV
+            "stdvar" -> AggrOp.STDVAR
+            "quantile" -> AggrOp.QUANTILE
+            "topk" -> AggrOp.TOPK
+            "bottomk" -> AggrOp.BOTTOMK
+            "limitk" -> AggrOp.LIMITK
+            "limit_ratio" -> AggrOp.LIMIT_RATIO
+            "count_values" -> AggrOp.COUNT_VALUES
+            else -> error("unknown aggregate operator: ${opTok.name}")
+        }
+
+        // 1. Обрабатываем by/without и список меток (parseLabelList сам прочитает ( ... ))
+        var grouping = emptyList<String>()
+        var without = false
+        if (peek(Token.By::class) || peek(Token.Without::class)) {
+            val tok = consume()
+            without = tok is Token.Without
+            grouping = parseLabelList()   // <- читает (mode)
+        }
+
+        // 2. Теперь ожидаем открывающую скобку для аргументов агрегации
+        expect(Token.LeftParen::class)
+
+        // 3. Параметр для функций, если нужно
+        var param: Expr? = null
+        if (op in setOf(AggrOp.TOPK, AggrOp.BOTTOMK, AggrOp.LIMITK, AggrOp.LIMIT_RATIO, AggrOp.QUANTILE, AggrOp.COUNT_VALUES)) {
+            param = parseBinaryExpr(0)
+            if (peek(Token.Comma::class)) consume()
+        }
+
+        // 4. Основное выражение
+        val expr = parseBinaryExpr(0)
+
+        // 5. Закрывающая скобка
+        expect(Token.RightParen::class)
+
+        return AggregateExpr(op, param, expr, grouping, without, PosRange(opTok.pos.start, prevPos()))
+    }
     private fun parseCall(): Call {
         val nameToken = expect(Token.Ident::class) as Token.Ident
         expect(Token.LeftParen::class)
@@ -607,7 +662,6 @@ class PromQLParser(private val tokens: List<Token>) {
         return Call(func, args, PosRange(nameToken.pos.start, rparen.pos.end))
     }
 
-    // ---------- Остальные методы без изменений ----------
     private fun parseVectorSelector(name: String): VectorSelector {
         val labelMatchers = mutableListOf<LabelMatcher>()
         if (peek(Token.LeftBrace::class)) {
@@ -629,6 +683,7 @@ class PromQLParser(private val tokens: List<Token>) {
                     val dur = expect(Token.Duration::class) as Token.Duration
                     offset = dur.millis
                 }
+
                 is Token.Op -> {
                     if ((tok as Token.Op).type == OpType.EQL && peekNext() is Token.Number) {
                         consume()
@@ -636,15 +691,29 @@ class PromQLParser(private val tokens: List<Token>) {
                         timestamp = (num.value * 1000).toLong()
                     } else break
                 }
+
                 is Token.Ident -> {
                     when ((tok as Token.Ident).name) {
-                        "start" -> { consume(); startOrEnd = StartOrEnd.START }
-                        "end" -> { consume(); startOrEnd = StartOrEnd.END }
-                        "anchored" -> { consume(); anchored = true }
-                        "smoothed" -> { consume(); smoothed = true }
+                        "start" -> {
+                            consume(); startOrEnd = StartOrEnd.START
+                        }
+
+                        "end" -> {
+                            consume(); startOrEnd = StartOrEnd.END
+                        }
+
+                        "anchored" -> {
+                            consume(); anchored = true
+                        }
+
+                        "smoothed" -> {
+                            consume(); smoothed = true
+                        }
+
                         else -> break
                     }
                 }
+
                 else -> break
             }
         }
@@ -744,8 +813,9 @@ class PromQLParser(private val tokens: List<Token>) {
 
     private fun startPos(): Int = if (pos < tokens.size) tokens[pos].pos.start else 0
     private fun prevPos(): Int = if (pos > 0) tokens[pos - 1].pos.end else 0
-}
-// ============================================================
+
+
+}// ============================================================
 // Part 6: Public API entry point
 // ============================================================
 

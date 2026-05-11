@@ -6,11 +6,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.reactive.awaitFirstOrNull
 import org.slf4j.LoggerFactory
-import org.springframework.core.io.buffer.DataBuffer
 import org.springframework.http.client.reactive.ReactorClientHttpConnector
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
-import org.springframework.web.reactive.function.client.bodyToFlux
 import reactor.netty.http.client.HttpClient
 import java.time.Duration
 import java.time.Instant
@@ -33,21 +31,17 @@ class AgentScraperClient {
             .build()
 
         try {
-            webClient.get()
+            val rawData = webClient.get()
                 .retrieve()
-                .bodyToFlux<DataBuffer>()
-                .limitRate(100)
-                .collect({ StringBuilder() }) { sb, chunk ->
-                    sb.append(chunk.toString(Charsets.UTF_8))
-                }
-                .awaitFirstOrNull()?.let {
-                    parsePrometheusFormatMetrics(it.toString(), agent).collect {
-                        emit(it)
-                    }
-                }
+                .bodyToMono(String::class.java)
+                .awaitFirstOrNull()
 
+            if (!rawData.isNullOrEmpty()) {
+                parsePrometheusFormatMetrics(rawData, agent).collect { emit(it) }
+            }
         } catch (e: Exception) {
             logger.error("Failed to scrape agent ${agent.id}: ${e.message}")
+            throw e
         }
     }
 
@@ -58,26 +52,24 @@ class AgentScraperClient {
             .filter { line -> !line.startsWith("#") && line.isNotBlank() }
             .forEach { line ->
                 try {
-                    val parts = line.split(" ")
-                    if (parts.size >= 2) {
-                        val namePart = parts[0]
-                        val value = parts[1].toDouble()
+                    val lastSpace = line.lastIndexOf(' ')
+                    val metricPart = line.substring(0, lastSpace)
+                    val valuePart = line.substring(lastSpace + 1).toDouble()
 
-                        val (name, tags) = parseMetricNameAndTags(namePart)
-                        val labels = tags + mapOf(
-                            "__name__" to name,
-                            "instance" to agent.id
-                        )
+                    val (name, tags) = parseMetricNameAndTags(metricPart)
+                    val labels = tags + mapOf(
+                        "__name__" to name,
+                        "instance" to agent.id
+                    )
 
-                        emit(
-                            MetricSampleModel(
-                                value = value,
-                                timestamp = currentTimestamp,
-                                labels = labels,
-                                hash = labels.hashCode()
-                            )
+                    emit(
+                        MetricSampleModel(
+                            value = valuePart,
+                            timestamp = currentTimestamp,
+                            labels = labels,
+                            hash = labels.hashCode()
                         )
-                    }
+                    )
                 } catch (e: Exception) {
                     logger.warn("Failed to parse metric line: $line")
                 }

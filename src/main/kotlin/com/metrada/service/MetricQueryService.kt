@@ -74,7 +74,7 @@ class MetricQueryService(
             is Value.Vector -> {
                 val results = value.samples.map { sample ->
                     VectorResultModel(
-                        metric = sample.metric.values,        // Map<String,String>
+                        metric = sample.labels.values,        // Map<String,String>
                         value = listOf(sample.t / 1000.0, sample.f)
                     )
                 }
@@ -87,7 +87,7 @@ class MetricQueryService(
                         listOf(point.timestamp / 1000.0, point.value)
                     }
                     MatrixResultModel(
-                        metric = series.metric.values,
+                        metric = series.labels.values,
                         values = values
                     )
                 }

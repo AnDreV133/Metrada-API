@@ -20,10 +20,10 @@ data class PosRange(val start: Int, val end: Int) {
 //}
 
 // Точка (значение в момент времени) – только float
-data class Sample(val metric: Labels, val t: Long, val f: Double, val dropName: Boolean = false)
+data class Sample(val labels: Labels, val t: Long, val f: Double, val dropName: Boolean = false)
 
 // Серия – список точек (для матрицы)
-data class Series(val metric: Labels, val points: MutableList<FPoint>, val dropName: Boolean = false)
+data class Series(val labels: Labels, val points: MutableList<FPoint>, val dropName: Boolean = false)
 data class FPoint(val timestamp: Long, val value: Double)
 
 // Результат выполнения запроса

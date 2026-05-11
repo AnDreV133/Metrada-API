@@ -10,6 +10,21 @@ import java.time.Instant
 
 @Repository
 interface MetricRepository : JpaRepository<MetricEntity, Long> {
+    @Query(
+        """
+    SELECT m FROM MetricEntity m
+    LEFT JOIN FETCH m.metricLabels ml
+    LEFT JOIN FETCH ml.labelDict
+    WHERE m.hash IN :hashes
+      AND m.timestamp BETWEEN :start AND :end
+    ORDER BY m.timestamp ASC
+    """
+    )
+    fun findAllByHashesAndTimeRange(
+        @Param("hashes") hashes: List<Int>,
+        @Param("start") start: Instant,
+        @Param("end") end: Instant
+    ): List<MetricEntity>
     /**
      * Находит метрики по списку ID и временному диапазону, с подгрузкой лейблов.
      * @param ids список ID метрик

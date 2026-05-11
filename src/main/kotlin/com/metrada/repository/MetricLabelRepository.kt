@@ -11,6 +11,23 @@ import java.time.Instant
 
 @Repository
 interface MetricLabelRepository : JpaRepository<MetricLabelEntity, Long> {
+    @Query(
+        """
+    SELECT DISTINCT m.hash
+    FROM MetricEntity m
+    WHERE m.id IN (
+        SELECT ml.metric.id
+        FROM MetricLabelEntity ml
+        WHERE ml.labelDict.hash IN :labelHashes
+        GROUP BY ml.metric.id
+        HAVING COUNT(DISTINCT ml.labelDict.id) = :requiredCount
+    )
+    """
+    )
+    fun findMetricHashesByRequiredLabelHashes(
+        @Param("labelHashes") labelHashes: List<String>,
+        @Param("requiredCount") requiredCount: Int,
+    ): List<Int>
 
     /**
      * Находит ID метрик, которые содержат все указанные хэши лейблов.

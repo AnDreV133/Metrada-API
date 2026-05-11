@@ -7,7 +7,7 @@ class Evaluator(
     private val engine: Engine,
     private val startTs: Long,
     private val endTs: Long,
-    private val interval: Long
+    private val interval: Long,
 ) {
     private var currentSamples = 0
 
@@ -95,33 +95,21 @@ class Evaluator(
     // -------- Агрегации (sum, avg, count, min, max, topk, bottomk) ----------
     private suspend fun evalAggregate(agg: AggregateExpr): Value {
         val inputMatrix = (eval(agg.expr) as Value.Matrix).series
-        val numSteps = ((endTs - startTs) / interval).toInt() + 1
         val grouping = agg.grouping.sorted()
         val without = agg.without
 
-        // Группировка: mapping ключ группировки -> индекс в выходной матрице
-        val groupMap = mutableMapOf<Long, MutableList<Int>>()
-        val outputSeries = mutableListOf<Series>()
+        // Маппинг: ключ группы -> временная метка -> аккумулятор
+        val groupMap = mutableMapOf<Long, MutableMap<Long, GroupAccumulator>>()
+        val groupLabels = mutableMapOf<Long, Labels>()
 
-//        for (series in inputMatrix) {
-//            val key = computeGroupKey(series.metric, grouping, without)
-//            val idx = groupMap.getOrPut(key) {
-//                val metric = buildOutputMetric(series.metric, grouping, without)
-//                outputSeries.add(Series(metric, mutableListOf()))
-//                outputSeries.size - 1
-//            } // todo wtf
-//        }
-
-        // Обработка каждого временного шага
-        for (stepIdx in 0 until numSteps) {
-            val ts = startTs + stepIdx * interval
-            val accum = Array(outputSeries.size) { GroupAccumulator() }
-
-            for (series in inputMatrix) {
-                val point = getPointAtTime(series, ts) ?: continue
-                val key = computeGroupKey(series.metric, grouping, without)
-                val groupIdx = groupMap[key]!!.first()
-                val acc = accum[groupIdx]
+        for (series in inputMatrix) {
+            val key = computeGroupKey(series.labels, grouping, without)
+            if (!groupLabels.containsKey(key)) {
+                groupLabels[key] = buildOutputLabels(series.labels, grouping, without)
+            }
+            val timeMap = groupMap.getOrPut(key) { mutableMapOf() }
+            for (point in series.points) {
+                val acc = timeMap.getOrPut(point.timestamp) { GroupAccumulator() }
                 acc.count++
                 when (agg.op) {
                     AggrOp.SUM -> acc.sum += point.value
@@ -142,10 +130,12 @@ class Evaluator(
                     else -> {}
                 }
             }
+        }
 
-            // Формируем точки для каждого выходного ряда
-            for ((idx, acc) in accum.withIndex()) {
-                if (acc.count == 0) continue
+        // Преобразуем в выходные серии
+        val outputSeries = groupMap.map { (key, timeMap) ->
+            val labels = groupLabels[key]!!
+            val points = timeMap.map { (ts, acc) ->
                 val value = when (agg.op) {
                     AggrOp.SUM -> acc.sum
                     AggrOp.AVG -> acc.sum / acc.avgCount
@@ -156,40 +146,30 @@ class Evaluator(
                     AggrOp.BOTTOMK -> acc.bottomKHeap.sorted().firstOrNull() ?: Double.NaN
                     else -> Double.NaN
                 }
-                addPoint(outputSeries[idx], ts, value)
-            }
+                FPoint(ts, value)
+            }.sortedBy { it.timestamp }
+            Series(labels, points.toMutableList())
         }
 
         return Value.Matrix(outputSeries)
     }
-
-    private fun getPointAtTime(series: Series, ts: Long): FPoint? {
-        // Предполагаем, что точки отсортированы по времени и мы потребляем их последовательно (в реальном evaluator нужно хранить позицию)
-        // Упрощённо: линейный поиск (в реальном проекте используйте итератор)
-        return series.points.find { it.timestamp == ts }
-    }
-
     private fun computeGroupKey(metric: Labels, grouping: List<String>, without: Boolean): Long {
         return if (without) metric.without(*grouping.toTypedArray()).hash()
         else if (grouping.isEmpty()) 0L
         else metric.keep(*grouping.toTypedArray()).hash()
     }
 
-    private fun buildOutputMetric(metric: Labels, grouping: List<String>, without: Boolean): Labels {
+    private fun buildOutputLabels(metric: Labels, grouping: List<String>, without: Boolean): Labels {
         return if (without) metric.without(*grouping.toTypedArray())
         else if (grouping.isEmpty()) Labels(emptyMap())
         else metric.keep(*grouping.toTypedArray())
-    }
-
-    private fun addPoint(series: Series, ts: Long, value: Double) {
-        series.points.add(FPoint(ts, value))
-        currentSamples++
     }
 
     // -------- Функции (пример rate) ----------
     private suspend fun evalCall(call: Call): Value {
         return when (call.func.name) {
             "rate" -> evalRate(call.args[0] as MatrixSelector)
+            "irate" -> evalIrate(call.args[0] as MatrixSelector)
             "increase" -> evalIncrease(call.args[0] as MatrixSelector)
             "sum", "avg", "count", "min", "max", "topk", "bottomk" -> evalCallAggregation(call)
             "abs" -> evalUnaryFloatOp(call.args[0]) { abs(it) }
@@ -209,12 +189,31 @@ class Evaluator(
             if (points.size < 2) continue
             val newPoints = mutableListOf<FPoint>()
             for (i in 1 until points.size) {
-                val dt = points[i].timestamp - points[i-1].timestamp // ms
+                val dt = points[i].timestamp - points[i - 1].timestamp // ms
                 if (dt <= 0) continue
-                val rate = (points[i].value - points[i-1].value) * 1000.0 / dt
+                val rate = (points[i].value - points[i - 1].value) * 1000.0 / dt
                 newPoints.add(FPoint(points[i].timestamp, rate))
             }
-            result.add(Series(series.metric, newPoints))
+            result.add(Series(series.labels, newPoints))
+        }
+        return Value.Matrix(result)
+    }
+
+    private suspend fun evalIrate(ms: MatrixSelector): Value {
+        val matrix = eval(ms) as Value.Matrix
+        val result = mutableListOf<Series>()
+        for (series in matrix.series) {
+            val points = series.points
+            if (points.size < 2) continue
+            // Take the last two points
+            val p1 = points[points.size - 2]
+            val p2 = points[points.size - 1]
+            val dt = (p2.timestamp - p1.timestamp).toDouble() / 1000.0 // seconds
+            if (dt <= 0) continue
+            val rate = (p2.value - p1.value) / dt
+            // Create a new series with a single point (the last timestamp)
+            val newPoints = mutableListOf(FPoint(p2.timestamp, rate))
+            result.add(Series(series.labels, newPoints))
         }
         return Value.Matrix(result)
     }
@@ -226,7 +225,7 @@ class Evaluator(
             val points = series.points
             if (points.size < 2) continue
             val increase = points.last().value - points.first().value
-            result.add(Series(series.metric, mutableListOf(FPoint(points.last().timestamp, increase))))
+            result.add(Series(series.labels, mutableListOf(FPoint(points.last().timestamp, increase))))
         }
         return Value.Matrix(result)
     }
@@ -257,12 +256,14 @@ class Evaluator(
                 val samples = inner.samples.map { it.copy(f = op(it.f)) }
                 Value.Vector(samples)
             }
+
             is Value.Matrix -> {
                 val series = inner.series.map { s ->
-                    Series(s.metric, s.points.map { p -> FPoint(p.timestamp, op(p.value)) }.toMutableList())
+                    Series(s.labels, s.points.map { p -> FPoint(p.timestamp, op(p.value)) }.toMutableList())
                 }
                 Value.Matrix(series)
             }
+
             else -> error("unsupported type for unary float op")
         }
     }
@@ -276,6 +277,7 @@ class Evaluator(
                 val v = scalarBinop(bin.op, lhs.value, rhs.value)
                 Value.Scalar(max(lhs.timestamp, rhs.timestamp), v)
             }
+
             lhs is Value.Vector && rhs is Value.Scalar -> {
                 val samples = lhs.samples.map { s ->
                     val v = scalarBinop(bin.op, s.f, rhs.value)
@@ -283,6 +285,7 @@ class Evaluator(
                 }
                 Value.Vector(samples)
             }
+
             lhs is Value.Scalar && rhs is Value.Vector -> {
                 val samples = rhs.samples.map { s ->
                     val v = scalarBinop(bin.op, lhs.value, s.f)
@@ -290,17 +293,39 @@ class Evaluator(
                 }
                 Value.Vector(samples)
             }
+
             lhs is Value.Vector && rhs is Value.Vector -> {
                 // Сложение векторов – сопоставление по меткам (упрощённо)
-                val mapRhs = rhs.samples.associateBy { it.metric.hash() }
+                val mapRhs = rhs.samples.associateBy { it.labels.hash() }
                 val samples = lhs.samples.mapNotNull { ls ->
-                    mapRhs[ls.metric.hash()]?.let { rs ->
+                    mapRhs[ls.labels.hash()]?.let { rs ->
                         val v = scalarBinop(bin.op, ls.f, rs.f)
                         ls.copy(f = v)
                     }
                 }
                 Value.Vector(samples)
             }
+
+            lhs is Value.Matrix && rhs is Value.Scalar -> {
+                val newSeries = lhs.series.map { series ->
+                    val newPoints = series.points.map { point ->
+                        FPoint(point.timestamp, scalarBinop(bin.op, point.value, rhs.value))
+                    }
+                    Series(series.labels, newPoints.toMutableList())
+                }
+                Value.Matrix(newSeries)
+            }
+
+            lhs is Value.Scalar && rhs is Value.Matrix -> {
+                val newSeries = rhs.series.map { series ->
+                    val newPoints = series.points.map { point ->
+                        FPoint(point.timestamp, scalarBinop(bin.op, lhs.value, point.value))
+                    }
+                    Series(series.labels, newPoints.toMutableList())
+                }
+                Value.Matrix(newSeries)
+            }
+
             else -> error("incompatible types for binary op")
         }
     }
@@ -329,10 +354,12 @@ class Evaluator(
                 is Value.Scalar -> Value.Scalar(inner.timestamp, -inner.value)
                 is Value.Vector -> Value.Vector(inner.samples.map { it.copy(f = -it.f) })
                 is Value.Matrix -> Value.Matrix(inner.series.map { s ->
-                    Series(s.metric, s.points.map { p -> FPoint(p.timestamp, -p.value) }.toMutableList())
+                    Series(s.labels, s.points.map { p -> FPoint(p.timestamp, -p.value) }.toMutableList())
                 })
+
                 else -> error("unsupported unary -")
             }
+
             OpType.ADD -> inner
             else -> error("unsupported unary operator")
         }

@@ -11,8 +11,8 @@ import java.time.Instant
 class Querier(
     private val metricRepository: MetricRepository,
     private val metricLabelRepository: MetricLabelRepository,
-    private val labelDictRepository: LabelDictRepository,
-) {
+    private val engine: Engine
+    ) {
 
     suspend fun select(mint: Long, maxt: Long, matchers: List<LabelMatcher>): ISeriesSet {
         // 1. Разбираем matchers на обязательные лейблы и возможные условия (=, =~, !=, !~)
@@ -33,25 +33,13 @@ class Querier(
         // 2. Получаем хэши для обязательных лейблов (из LabelDictEntity)
         val requiredHashes = requiredLabels.map { (k, v) -> LabelDictEntity.generateHash(k, v) }
 
-        // 3. Находим ID метрик, которые содержат все обязательные лейблы
-        val metricIds = if (requiredHashes.isNotEmpty()) {
-            // Запрос: метрики, у которых есть все указанные хэши (HAVING COUNT = количеству хэшей)
-            metricLabelRepository.findMetricIdsByHashes(requiredHashes, requiredHashes.size)
-        } else {
-            // Если нет обязательных лейблов – пока пустой список, дальше загрузим по времени но без фильтра по лейблам неэффективно
-            // Можно вернуть все метрики, но лучше ограничить временем.
-            emptyList()
-        }
+        val metricHashes = if (requiredHashes.isNotEmpty()) {
+            metricLabelRepository.findMetricHashesByRequiredLabelHashes(requiredHashes, requiredHashes.size)
+        } else { emptyList() }
 
-        // 4. Загружаем метрики по найденным ID и временному диапазону
-        val entities = if (metricIds.isNotEmpty()) {
-            metricRepository.findAllByIdAndTimeRange(metricIds, Instant.ofEpochMilli(mint), Instant.ofEpochMilli(maxt))
-        } else {
-            // Если нет обязательных лейблов, можно загрузить все метрики в диапазоне,
-            // но тогда нужно будет вручную фильтровать по лейблам в памяти (медленно).
-            // Лучше иметь возможность загружать без обязательных лейблов – тогда используем другой метод.
-            emptyList()
-        }
+        val entities = if (metricHashes.isNotEmpty()) {
+            metricRepository.findAllByHashesAndTimeRange(metricHashes, Instant.ofEpochMilli(mint), Instant.ofEpochMilli(maxt))
+        } else { emptyList() }
 
         // 5. Применяем дополнительные фильтры (=~, !=, !~) в памяти
         val filteredEntities = entities.filter { metric ->
@@ -72,9 +60,9 @@ class Querier(
         }
 
         // 7. Сортировка и преобразование в итераторы (аналогично предыдущей версии)
-        val seriesList = seriesMap.map { (labels, points) ->
+        val seriesList = seriesMap.map { (hashes, points) ->
             object : IStorageSeries {
-                override fun labels() = labels
+                override fun labels() = hashes
                 override fun iterator() = object : ISeriesIterator {
                     private var idx = 0
                     override fun seek(ts: Long): Boolean {
