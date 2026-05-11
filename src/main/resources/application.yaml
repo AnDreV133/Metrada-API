@@ -6,6 +6,9 @@ spring:
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 50
+      connection-timeout: 60000
   jpa:
     hibernate:
       ddl-auto: update
@@ -59,3 +62,8 @@ info:
     description: "Metrada Metrics API"
   java:
     version: "@java.version@"
+
+logging:
+  level:
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE

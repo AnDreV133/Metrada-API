@@ -113,7 +113,10 @@ class Evaluator(
                 acc.count++
                 when (agg.op) {
                     AggrOp.SUM -> acc.sum += point.value
-                    AggrOp.AVG -> { acc.sum += point.value; acc.avgCount++ }
+                    AggrOp.AVG -> {
+                        acc.sum += point.value; acc.avgCount++
+                    }
+
                     AggrOp.COUNT -> acc.countVal++
                     AggrOp.MIN -> acc.min = min(acc.min, point.value)
                     AggrOp.MAX -> acc.max = max(acc.max, point.value)
@@ -122,11 +125,13 @@ class Evaluator(
                         acc.topKHeap.add(point.value)
                         if (acc.topKHeap.size > k) acc.topKHeap.remove()
                     }
+
                     AggrOp.BOTTOMK -> {
                         val k = (agg.param as? NumberLiteral)?.value?.toInt() ?: 1
                         acc.bottomKHeap.add(point.value)
                         if (acc.bottomKHeap.size > k) acc.bottomKHeap.remove()
                     }
+
                     else -> {}
                 }
             }
@@ -153,6 +158,7 @@ class Evaluator(
 
         return Value.Matrix(outputSeries)
     }
+
     private fun computeGroupKey(metric: Labels, grouping: List<String>, without: Boolean): Long {
         return if (without) metric.without(*grouping.toTypedArray()).hash()
         else if (grouping.isEmpty()) 0L
@@ -205,14 +211,16 @@ class Evaluator(
         for (series in matrix.series) {
             val points = series.points
             if (points.size < 2) continue
-            // Take the last two points
-            val p1 = points[points.size - 2]
-            val p2 = points[points.size - 1]
-            val dt = (p2.timestamp - p1.timestamp).toDouble() / 1000.0 // seconds
-            if (dt <= 0) continue
-            val rate = (p2.value - p1.value) / dt
-            // Create a new series with a single point (the last timestamp)
-            val newPoints = mutableListOf(FPoint(p2.timestamp, rate))
+            val newPoints = mutableListOf<FPoint>()
+            // Вычисляем irate для каждой последовательной пары точек
+            for (i in 1 until points.size) {
+                val p1 = points[i - 1]
+                val p2 = points[i]
+                val dt = (p2.timestamp - p1.timestamp).toDouble() / 1000.0 // seconds
+                if (dt <= 0) continue
+                val rate = (p2.value - p1.value) / dt
+                newPoints.add(FPoint(p2.timestamp, rate))
+            }
             result.add(Series(series.labels, newPoints))
         }
         return Value.Matrix(result)
@@ -322,6 +330,21 @@ class Evaluator(
                         FPoint(point.timestamp, scalarBinop(bin.op, lhs.value, point.value))
                     }
                     Series(series.labels, newPoints.toMutableList())
+                }
+                Value.Matrix(newSeries)
+            }
+
+            lhs is Value.Matrix && rhs is Value.Matrix -> {
+                // Предполагаем, что серии имеют одинаковые метки и одинаковые временные метки
+                val newSeries = lhs.series.zip(rhs.series).map { (lseries, rseries) ->
+                    val points = lseries.points.zip(rseries.points).map { (lp, rp) ->
+                        if (lp.timestamp != rp.timestamp) {
+                            // можно более сложное выравнивание, но для простоты считаем, что совпадают
+                            error("Timestamps mismatch in matrix binary op")
+                        }
+                        FPoint(lp.timestamp, scalarBinop(bin.op, lp.value, rp.value))
+                    }.toMutableList()
+                    Series(lseries.labels, points)
                 }
                 Value.Matrix(newSeries)
             }

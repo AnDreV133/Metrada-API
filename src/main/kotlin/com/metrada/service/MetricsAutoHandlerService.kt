@@ -9,6 +9,7 @@ import com.metrada.model.AgentModel
 import com.metrada.model.MetricSampleModel
 import com.metrada.repository.*
 import com.metrada.util.chunked
+import jakarta.annotation.PostConstruct
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -16,6 +17,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class MetricsAutoHandlerService(
@@ -29,8 +31,18 @@ class MetricsAutoHandlerService(
     private val logger = LoggerFactory.getLogger(javaClass)
     private val scope = CoroutineScope(Dispatchers.Default)
 
-    init {
+    private val cache = ConcurrentHashMap<String, LabelDictEntity>()
+
+    @PostConstruct
+    fun start() {
         logger.info("Initializing MetricsDynamicScrapingService")
+
+        logger.info("Loading label dictionary into cache...")
+        val allLabels = labelDictRepository.findAll()
+        allLabels.forEach { label ->
+            cache["${label.labelKey}=${label.labelValue}"] = label
+        }
+        logger.info("Loaded ${allLabels.size} labels into cache")
 
         // Регистрируем функцию скрапинга в пуле воркеров
         workerPool.scraperFunction = ::scrapeAndSaveMetrics
@@ -96,7 +108,7 @@ class MetricsAutoHandlerService(
             val allLabelEntries = samples.flatMap { it.labels.entries }.distinct()
 
             // Находим или создаём теги в словаре
-            val labelDictMap = findOrCreateLabelDicts(allLabelEntries)
+            val labelDictMap = findOrCreateBatch(allLabelEntries)
 
             // Создаём метрики (без тегов пока)
             val metrics = samples.map { sample ->
@@ -146,31 +158,81 @@ class MetricsAutoHandlerService(
     }
 
     /**
-     * Находит или создаёт теги в словаре
+     * Находит или создаёт LabelDictEntity
      */
-    private fun findOrCreateLabelDicts(labelEntries: List<Map.Entry<String, String>>): Map<String, LabelDictEntity> {
-        val result = mutableMapOf<String, LabelDictEntity>()
-        val toCreate = mutableListOf<Pair<String, String>>()
+    suspend fun findOrCreate(labelKey: String, labelValue: String): LabelDictEntity {
+        val key = "$labelKey=$labelValue"
 
-        // Сначала ищем существующие теги
-        labelEntries.forEach { (key, value) ->
-            val existing = labelDictRepository.findByKeyAndValue(key, value)
-            if (existing != null) {
-                result["$key=$value"] = existing
+        // Проверяем кэш
+        cache[key]?.let { return it }
+
+        // Проверяем БД
+        val hash = LabelDictEntity.generateHash(labelKey, labelValue)
+        val existing = labelDictRepository.findByHash(hash)
+        if (existing != null) {
+            cache[key] = existing
+            return existing
+        }
+
+        // Создаём новую запись
+        val newLabel = LabelDictEntity(
+            labelKey = labelKey,
+            labelValue = labelValue,
+            hash = hash
+        )
+        val saved = labelDictRepository.save(newLabel)
+        cache[key] = saved
+        logger.debug("Created new label: $key")
+        return saved
+    }
+
+    /**
+     * Пакетное нахождение или создание лейблов
+     */
+    suspend fun findOrCreateBatch(labelEntries: List<Map.Entry<String, String>>): Map<String, LabelDictEntity> {
+        val result = mutableMapOf<String, LabelDictEntity>()
+        val missing = mutableListOf<Triple<String, String, String>>()
+
+        // Сначала проверяем кэш
+        for (entry in labelEntries) {
+            val key = "${entry.key}=${entry.value}"
+            val cached = cache[key]
+            if (cached != null) {
+                result[key] = cached
             } else {
-                toCreate.add(key to value)
+                missing.add(Triple(key, entry.key, entry.value))
             }
         }
 
-        // Создаём недостающие теги
-        if (toCreate.isNotEmpty()) {
-            logger.debug("Creating ${toCreate.size} new label dictionaries")
-            val newLabelDicts = toCreate.map { (key, value) ->
-                LabelDictEntity.fromKeyValue(key, value)
+        if (missing.isNotEmpty()) {
+            // Проверяем в БД все отсутствующие
+            val hashes = missing.map { LabelDictEntity.generateHash(it.second, it.third) }
+            val existingMap = labelDictRepository.findAllByHashIn(hashes)
+                .associateBy { "${it.labelKey}=${it.labelValue}" }
+
+            // Обновляем кэш существующими
+            existingMap.forEach { (key, label) ->
+                cache[key] = label
+                result[key] = label
             }
-            val saved = labelDictRepository.saveAll(newLabelDicts)
-            saved.forEach { labelDict ->
-                result["${labelDict.labelKey}=${labelDict.labelValue}"] = labelDict
+
+            // Создаём действительно новые
+            val toCreate = missing.filter { (key, _, _) -> key !in existingMap }
+            if (toCreate.isNotEmpty()) {
+                val newLabels = toCreate.map { (_, labelKey, labelValue) ->
+                    LabelDictEntity(
+                        labelKey = labelKey,
+                        labelValue = labelValue,
+                        hash = LabelDictEntity.generateHash(labelKey, labelValue)
+                    )
+                }
+                val savedLabels = labelDictRepository.saveAll(newLabels)
+                savedLabels.forEach { label ->
+                    val key = "${label.labelKey}=${label.labelValue}"
+                    cache[key] = label
+                    result[key] = label
+                }
+                logger.debug("Created ${savedLabels.size} new labels")
             }
         }
 

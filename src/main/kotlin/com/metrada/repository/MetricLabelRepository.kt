@@ -25,7 +25,7 @@ interface MetricLabelRepository : JpaRepository<MetricLabelEntity, Long> {
     """
     )
     fun findMetricHashesByRequiredLabelHashes(
-        @Param("labelHashes") labelHashes: List<String>,
+        @Param("labelHashes") labelHashes: List<Int>,
         @Param("requiredCount") requiredCount: Int,
     ): List<Int>
 

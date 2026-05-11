@@ -3,7 +3,10 @@ package com.metrada.entity
 import jakarta.persistence.*
 
 @Entity
-@Table(name = "labels_dict")
+@Table(
+    name = "labels_dict",
+    indexes = [Index(columnList = "hash")]
+)
 data class LabelDictEntity(
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -16,7 +19,7 @@ data class LabelDictEntity(
     val labelValue: String,
 
     @Column(unique = true, nullable = false)
-    val hash: String,
+    val hash: Int,
 ) {
     companion object {
         fun fromKeyValue(key: String, value: String): LabelDictEntity {
@@ -27,8 +30,6 @@ data class LabelDictEntity(
             )
         }
 
-        fun generateHash(key: String, value: String): String {
-            return "$key=$value".hashCode().toString(16)
-        }
+        fun generateHash(key: String, value: String) = "$key=$value".hashCode()
     }
 }
