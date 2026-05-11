@@ -7,7 +7,10 @@ import java.time.Instant
 @Entity
 @Table(
     name = "metrics",
-    indexes = [Index(columnList = "hash")]
+    indexes = [
+        Index(columnList = "hash"),
+        Index(columnList = "timestamp")
+    ]
 )
 data class MetricEntity(
     @Id

@@ -1,72 +1,57 @@
 package com.metrada.service.parser
 
+import com.github.benmanes.caffeine.cache.Caffeine
 import com.metrada.entity.LabelDictEntity
 import com.metrada.repository.MetricRepository
 import com.metrada.repository.MetricLabelRepository
-import com.metrada.repository.LabelDictRepository
 import org.springframework.stereotype.Component
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 
 @Component
 class Querier(
     private val metricRepository: MetricRepository,
-    private val metricLabelRepository: MetricLabelRepository,
-    private val engine: Engine
-    ) {
+    private val metricLabelRepository: MetricLabelRepository
+) {
+    private val cache = Caffeine.newBuilder()
+        .maximumSize(10_000)
+        .expireAfterWrite(5, TimeUnit.MINUTES)
+        .build<CacheKey, List<Int>>()
 
     suspend fun select(mint: Long, maxt: Long, matchers: List<LabelMatcher>): ISeriesSet {
-        // 1. Разбираем matchers на обязательные лейблы и возможные условия (=, =~, !=, !~)
-        val requiredLabels = mutableMapOf<String, String>()   // для точных равенств
-        val regexLabels = mutableListOf<Pair<String, Regex>>() // для =~
-        val negateLabels = mutableListOf<Pair<String, String>>() // для !=
-        val negateRegex = mutableListOf<Pair<String, Regex>>() // для !~
+        val (required, regex, negate, negateRegex) = categorizeMatchers(matchers)
+        if (required.isEmpty()) return EmptySeriesSet
 
-        for (m in matchers) {
-            when (m.type) {
-                MatchTypeEnum.Equal -> requiredLabels[m.name] = m.value
-                MatchTypeEnum.Regexp -> regexLabels.add(m.name to m.value.toRegex())
-                MatchTypeEnum.NotEqual -> negateLabels.add(m.name to m.value)
-                MatchTypeEnum.NotRegexp -> negateRegex.add(m.name to m.value.toRegex())
-            }
-        }
-
-        // 2. Получаем хэши для обязательных лейблов (из LabelDictEntity)
-        val requiredHashes = requiredLabels.map { (k, v) -> LabelDictEntity.generateHash(k, v) }
-
-        val metricHashes = if (requiredHashes.isNotEmpty()) {
+        val metricHashes = cache.get(CacheKey(mint, maxt, required)) {
+            val requiredHashes = required.map { (k, v) -> LabelDictEntity.generateHash(k, v) }
             metricLabelRepository.findMetricHashesByRequiredLabelHashes(requiredHashes, requiredHashes.size)
-        } else { emptyList() }
+        }
+        if (metricHashes.isEmpty()) return EmptySeriesSet
 
-        val entities = if (metricHashes.isNotEmpty()) {
-            metricRepository.findAllByHashesAndTimeRange(metricHashes, Instant.ofEpochMilli(mint), Instant.ofEpochMilli(maxt))
-        } else { emptyList() }
+        val start = Instant.ofEpochMilli(mint)
+        val end = Instant.ofEpochMilli(maxt)
+        val entities = metricRepository.findAllByHashesAndTimeRange(metricHashes, start, end)
+        if (entities.isEmpty()) return EmptySeriesSet
 
-        // 5. Применяем дополнительные фильтры (=~, !=, !~) в памяти
-        val filteredEntities = entities.filter { metric ->
-            // Получаем все лейблы метрики (можно загрузить одним запросом для всех метрик, но здесь упрощённо)
+        val filtered = entities.filter { metric ->
             val labels = metric.metricLabels.associate { it.labelDict.labelKey to it.labelDict.labelValue }
-            // Должны выполняться все условия
-            regexLabels.all { (key, regex) -> regex.matches(labels[key] ?: "") } &&
-                    negateLabels.all { (key, value) -> labels[key] != value } &&
-                    negateRegex.all { (key, regex) -> !regex.matches(labels[key] ?: "") }
+            regex.all { (k, r) -> r.matches(labels[k] ?: "") } &&
+                    negate.all { (k, v) -> labels[k] != v } &&
+                    negateRegex.all { (k, r) -> !r.matches(labels[k] ?: "") }
         }
+        if (filtered.isEmpty()) return EmptySeriesSet
 
-        // 6. Группировка в серии по всем лейблам
-        val seriesMap = mutableMapOf<Labels, MutableList<FPoint>>()
-        for (e in filteredEntities.sortedBy { it.timestamp }) {
-            val labelsMap = e.metricLabels.associate { it.labelDict.labelKey to it.labelDict.labelValue }
-            val point = FPoint(e.timestamp.toEpochMilli(), e.value)
-            seriesMap.getOrPut(Labels(labelsMap)) { mutableListOf() }.add(point)
-        }
+        val grouped = filtered.sortedBy { it.timestamp }
+            .groupBy { Labels(it.metricLabels.associate { it.labelDict.labelKey to it.labelDict.labelValue }) }
+            .mapValues { (_, metrics) -> metrics.map { FPoint(it.timestamp.toEpochMilli(), it.value) } }
 
-        // 7. Сортировка и преобразование в итераторы (аналогично предыдущей версии)
-        val seriesList = seriesMap.map { (hashes, points) ->
+        val seriesList = grouped.map { (labels, points) ->
             object : IStorageSeries {
-                override fun labels() = hashes
+                override fun labels() = labels
                 override fun iterator() = object : ISeriesIterator {
                     private var idx = 0
                     override fun seek(ts: Long): Boolean {
-                        idx = points.binarySearch { it.timestamp.compareTo(ts) }.let { if (it < 0) -it - 1 else it }
+                        idx = points.binarySearchBy(ts) { it.timestamp }.let { if (it < 0) -it - 1 else it }
                         return idx < points.size
                     }
                     override fun next(): Boolean = (++idx) < points.size
@@ -79,6 +64,50 @@ class Querier(
         return PostgresSeriesSet(seriesList)
     }
 
+    private fun categorizeMatchers(matchers: List<LabelMatcher>): LabelCategories {
+        val required = mutableMapOf<String, String>()
+        val regex = mutableListOf<Pair<String, Regex>>()
+        val negate = mutableListOf<Pair<String, String>>()
+        val negateRegex = mutableListOf<Pair<String, Regex>>()
+        for (m in matchers) {
+            when (m.type) {
+                MatchTypeEnum.Equal -> required[m.name] = m.value
+                MatchTypeEnum.Regexp -> regex.add(m.name to m.value.toRegex())
+                MatchTypeEnum.NotEqual -> negate.add(m.name to m.value)
+                MatchTypeEnum.NotRegexp -> negateRegex.add(m.name to m.value.toRegex())
+            }
+        }
+        return LabelCategories(required, regex, negate, negateRegex)
+    }
+
+    private data class CacheKey(
+        val mint: Long,
+        val maxt: Long,
+        val required: Map<String, String>
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as CacheKey
+            return mint == other.mint && maxt == other.maxt && required == other.required
+        }
+        override fun hashCode(): Int = 31 * (31 * mint.hashCode() + maxt.hashCode()) + required.hashCode()
+    }
+
+    private data class LabelCategories(
+        val required: Map<String, String>,
+        val regex: List<Pair<String, Regex>>,
+        val negate: List<Pair<String, String>>,
+        val negateRegex: List<Pair<String, Regex>>
+    )
+
+    private object EmptySeriesSet : ISeriesSet {
+        override suspend fun next() = false
+        override fun at() = error("No series")
+        override fun warnings() = emptyList<Throwable>()
+        override fun error() = null
+    }
+
     private inner class PostgresSeriesSet(private val series: List<IStorageSeries>) : ISeriesSet {
         private var pos = -1
         override suspend fun next(): Boolean {
@@ -88,9 +117,23 @@ class Querier(
             }
             return false
         }
-
         override fun at() = series[pos]
-        override fun warnings() = listOf<Throwable>()
+        override fun warnings() = emptyList<Throwable>()
         override fun error() = null
     }
+}
+
+private fun <T> List<T>.binarySearchBy(key: Long, selector: (T) -> Long): Int {
+    var low = 0
+    var high = size - 1
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        val midVal = selector(this[mid])
+        when {
+            midVal < key -> low = mid + 1
+            midVal > key -> high = mid - 1
+            else -> return mid
+        }
+    }
+    return -low - 1
 }

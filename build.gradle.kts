@@ -39,6 +39,8 @@ dependencies {
 	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-reactor")
 
 	implementation("org.springframework.boot:spring-boot-starter-actuator")
+
+	implementation("com.github.ben-manes.caffeine:caffeine:3.1.8")
 }
 
 kotlin {
