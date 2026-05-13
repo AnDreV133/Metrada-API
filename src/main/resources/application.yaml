@@ -28,11 +28,6 @@ server:
     include-binding-errors: always
 
 management:
-  endpoints:
-    web:
-      exposure:
-        include: health,metrics,info,prometheus
-      base-path: /actuator
   endpoint:
     health:
       show-details: always
@@ -62,8 +57,3 @@ info:
     description: "Metrada Metrics API"
   java:
     version: "@java.version@"
-
-logging:
-  level:
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE

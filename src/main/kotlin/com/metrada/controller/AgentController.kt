@@ -12,7 +12,7 @@ import java.time.Instant
 @RequestMapping("/api/v1/agents")
 class AgentController(
     private val agentConfigurationService: AgentConfigurationService,
-    private val metricsAutoHandlerService: MetricsAutoHandlerService
+    private val metricsAutoHandlerService: MetricsAutoHandlerService,
 ) {
 
     @GetMapping
@@ -40,11 +40,6 @@ class AgentController(
             path = request.path ?: "/metrics",
             scrapeIntervalSeconds = request.scrapeIntervalSeconds ?: 15,
             enabled = request.enabled ?: true,
-            timeoutSeconds = request.timeoutSeconds ?: 5,
-            lastScrapeAt = null,
-            lastScrapeStatus = null,
-            createdAt = Instant.now(),
-            updatedAt = Instant.now()
         )
 
         return try {
@@ -102,6 +97,5 @@ data class CreateAgentRequest(
     val path: String? = null,
     val scrapeIntervalSeconds: Long? = null,
     val enabled: Boolean? = null,
-    val timeoutSeconds: Int? = null,
 )
 

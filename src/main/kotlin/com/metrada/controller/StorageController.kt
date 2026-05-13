@@ -2,14 +2,13 @@ package com.metrada.controller
 
 import com.metrada.repository.MetricRepository
 import com.metrada.service.AgentConfigurationService
-import com.metrada.service.CleanupResult
-import com.metrada.service.CleanupSummary
 import com.metrada.service.MetricsCleanupService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 
 @RestController
 @RequestMapping("/v1/storage")
+@Deprecated("not used")
 class StorageController(
     private val agentConfigurationService: AgentConfigurationService,
     private val metricsCleanupService: MetricsCleanupService,
@@ -38,23 +37,5 @@ class StorageController(
 //        )
 //    }
 
-    /**
-     * Принудительная очистка метрик агента
-     */
-    @PostMapping("/{id}/cleanup")
-    suspend fun cleanupAgentMetrics(@PathVariable id: String): ResponseEntity<CleanupResult> {
-        val result = metricsCleanupService.cleanupForAgent(id)
-            ?: return ResponseEntity.notFound().build()
 
-        return ResponseEntity.ok(result)
-    }
-
-    /**
-     * Принудительная очистка всех метрик
-     */
-    @PostMapping("/cleanup/all")
-    suspend fun cleanupAllMetrics(): ResponseEntity<CleanupSummary> {
-        val result = metricsCleanupService.forceCleanup()
-        return ResponseEntity.ok(result)
-    }
 }

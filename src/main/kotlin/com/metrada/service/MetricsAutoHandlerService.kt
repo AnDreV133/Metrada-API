@@ -63,7 +63,6 @@ class MetricsAutoHandlerService(
             path = agent.path,
             scrapeIntervalSeconds = agent.scrapeIntervalSeconds,
             enabled = agent.enabled,
-            timeoutSeconds = agent.timeoutSeconds
         )
 
         try {
@@ -76,25 +75,8 @@ class MetricsAutoHandlerService(
                         logger.error("Failed to save metrics: ${e.message}")
                     }
                 }
-
-//            if (samples.isNotEmpty()) {
-//            scope.launch {
-//                try {
-//                    saveMetrics(samples, agent)
-//                } catch (e: Exception) {
-//                    logger.error("Failed to save metrics: ${e.message}")
-//                }
-//            }
-
-//                updateAgentStatus(agent.id, "success")
-//                logger.info("Successfully scraped ${samples.size} metrics from agent ${agent.id}")
-//            } else {
-//                updateAgentStatus(agent.id, "empty")
-//                logger.warn("Agent ${agent.id} returned empty metrics")
-//            }
         } catch (e: Exception) {
             logger.error("Failed to scrape agent ${agent.id}: ${e.message}")
-            updateAgentStatus(agent.id, "failed: ${e.message}")
         }
     }
 
@@ -237,20 +219,6 @@ class MetricsAutoHandlerService(
         }
 
         return result
-    }
-
-    /**
-     * Обновляет статус последнего скрапинга агента
-     */
-    @Transactional
-    private fun updateAgentStatus(agentId: String, status: String) {
-        scope.launch {
-            try {
-                agentRepository.updateScrapeStatus(agentId, Instant.now(), status)
-            } catch (e: Exception) {
-                logger.error("Failed to update agent status: ${e.message}")
-            }
-        }
     }
 
     /**

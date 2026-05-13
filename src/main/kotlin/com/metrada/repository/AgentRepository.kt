@@ -28,42 +28,10 @@ interface AgentRepository : JpaRepository<AgentEntity, String> {
     fun findActiveAgents(): List<AgentEntity>
 
     /**
-     * Обновить статус последнего скрапинга
-     */
-    @Transactional
-    @Modifying
-    @Query(
-        """
-        UPDATE AgentEntity a 
-        SET a.lastScrapeAt = :lastScrapeAt, 
-            a.lastScrapeStatus = :status,
-            a.updatedAt = :lastScrapeAt
-        WHERE a.id = :agentId
-    """
-    )
-    fun updateScrapeStatus(
-        @Param("agentId") agentId: String,
-        @Param("lastScrapeAt") lastScrapeAt: Instant,
-        @Param("status") status: String,
-    )
-
-    /**
      * Поиск агентов по хосту (частичное совпадение)
      */
     @Query("SELECT a FROM AgentEntity a WHERE a.host LIKE %:hostPattern%")
     fun findByHostContaining(@Param("hostPattern") hostPattern: String): List<AgentEntity>
-
-    /**
-     * Получить агентов, которые давно не опрашивались
-     */
-    @Query(
-        """
-        SELECT a FROM AgentEntity a 
-        WHERE a.enabled = true 
-          AND (a.lastScrapeAt IS NULL OR a.lastScrapeAt < :threshold)
-    """
-    )
-    fun findStaleAgents(@Param("threshold") threshold: Instant): List<AgentEntity>
 
     /**
      * Подсчет агентов по статусам
@@ -73,12 +41,6 @@ interface AgentRepository : JpaRepository<AgentEntity, String> {
 
     @Query("SELECT COUNT(a) FROM AgentEntity a WHERE a.enabled = false")
     fun countInactive(): Long
-
-    @Query("SELECT COUNT(a) FROM AgentEntity a WHERE a.lastScrapeStatus = 'success'")
-    fun countWithSuccessfulScrape(): Long
-
-    @Query("SELECT COUNT(a) FROM AgentEntity a WHERE a.lastScrapeStatus LIKE 'failed%'")
-    fun countWithFailedScrape(): Long
 }
 
 

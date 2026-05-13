@@ -1,4 +1,4 @@
-package com.metrada.scheduler
+package com.metrada.demon
 
 import com.metrada.entity.AgentEntity
 import com.metrada.model.MetricSampleModel

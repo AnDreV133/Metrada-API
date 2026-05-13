@@ -29,9 +29,6 @@ class AgentConfigurationService(
                 path = "/metrics",
                 scrapeIntervalSeconds = 15,
                 enabled = true,
-                timeoutSeconds = 5,
-                lastScrapeAt = null,
-                lastScrapeStatus = null,
                 createdAt = Instant.now(),
                 updatedAt = Instant.now()
             )
@@ -93,7 +90,6 @@ class AgentConfigurationService(
             port = model.port ?: existingAgent.port,
             path = model.path ?: existingAgent.path,
             scrapeIntervalSeconds = model.scrapeIntervalSeconds ?: existingAgent.scrapeIntervalSeconds,
-            timeoutSeconds = model.timeoutSeconds ?: existingAgent.timeoutSeconds,
             enabled = model.enabled ?: existingAgent.enabled,
             updatedAt = Instant.now()
         )
@@ -119,8 +115,6 @@ class AgentConfigurationService(
         val agentToSave = updatedAgent.copy(
             createdAt = existingAgent.createdAt,  // не меняем дату создания
             updatedAt = Instant.now(),
-            lastScrapeAt = existingAgent.lastScrapeAt,  // сохраняем историю скрапинга
-            lastScrapeStatus = existingAgent.lastScrapeStatus
         )
 
         return agentRepository.save(agentToSave)
@@ -180,7 +174,6 @@ class AgentConfigurationService(
 
         val updatedAgent = agent.copy(
             scrapeIntervalSeconds = scrapeIntervalSeconds ?: agent.scrapeIntervalSeconds,
-            timeoutSeconds = timeoutSeconds ?: agent.timeoutSeconds,
             path = path ?: agent.path,
             updatedAt = Instant.now()
         )
@@ -226,11 +219,6 @@ class AgentConfigurationService(
             totalAgents = allAgents.size,
             activeAgents = activeAgents.size,
             inactiveAgents = allAgents.size - activeAgents.size,
-            lastScrapeSuccess = allAgents.count { it.lastScrapeStatus == "success" },
-            lastScrapeFailed = allAgents.count {
-                it.lastScrapeStatus != null && it.lastScrapeStatus != "success"
-            },
-            neverScraped = allAgents.count { it.lastScrapeAt == null }
         )
     }
 }
